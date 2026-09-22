@@ -46,8 +46,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,   target: x86_64-unknown-linux-gnu,  label: linux-x86_64 }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, label: linux-aarch64 }
+          # Built on the oldest supported image so the binaries keep working on
+          # Debian 12 and Ubuntu 22.04; newer runners link against a glibc that
+          # those distributions do not ship.
+          - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  label: linux-x86_64 }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, label: linux-aarch64 }
           # Both macOS slices are built on Apple Silicon: the Intel runners
           # queue for a long time and the SDK cross-compiles x86_64 fine.
           - { os: macos-14,        target: aarch64-apple-darwin,      label: macos-arm64 }
@@ -97,8 +100,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,    arch: x64 }
-          - { os: ubuntu-24.04-arm, arch: arm64 }
+          # Same glibc reasoning as the archives above.
+          - { os: ubuntu-22.04,     arch: x64 }
+          - { os: ubuntu-22.04-arm, arch: arm64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
