@@ -1,0 +1,12 @@
+# MS3 1.2+ documented 112-byte compatibility reply ('a' 00 06).
+# See megasquirt-ms2-serial.toml, megasquirt-ms3pro-serial.toml and
+# microsquirt-serial.toml for the other serial MegaSquirt controllers.
+ecu_protocol = "ms3"
+connection_type = "serial"
+port_name = "/dev/ttyUSB0"
+baud_rate = 115200
+read_timeout_ms = 2000
+refresh_rate_ms = 50
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/g86/car-1/ecu/"

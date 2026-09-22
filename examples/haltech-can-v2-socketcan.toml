@@ -1,0 +1,12 @@
+# Haltech V2 read directly from a Linux CAN interface — no gateway process.
+# Bring the interface up first (bitrate must match the ECU, Haltech V2 = 1 Mbit/s):
+#   sudo ip link set can0 up type can bitrate 1000000
+# For a USB adapter that presents a serial SLCAN device use slcand, or fall back
+# to scripts/can_gateway.py with connection_type = "tcp".
+ecu_protocol = "haltech_can_v2"
+connection_type = "can"
+can_interface = "can0"
+can_base_id = 0x360
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/ECU/"

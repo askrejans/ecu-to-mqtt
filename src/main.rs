@@ -1,14 +1,17 @@
-//! # Speeduino to MQTT
+//! # ECU to MQTT
 //!
-//! Bridges a Speeduino ECU (serial or TCP) to an MQTT broker.
+//! Bridges an engine controller (Speeduino, MegaSquirt or a documented
+//! manufacturer CAN stream) to an MQTT broker over serial, TCP or a CAN gateway.
 //!
-//! **Interactive mode** (TTY detected): renders a live TUI and optionally
-//! writes to MQTT when `mqtt_enabled = true`.
+//! **Interactive mode** (TTY detected): renders a live TUI for the selected
+//! profile and optionally writes to MQTT when `mqtt_enabled = true`.
 //!
 //! **Service mode** (no TTY / running under systemd): structured logging to
 //! stdout, same ECU polling logic.
 
+mod can_input;
 mod can_profiles;
+mod can_socket;
 mod can_stream;
 mod config;
 mod connection;
@@ -49,25 +52,32 @@ struct CliOptions {
 }
 
 fn print_help() {
-    println!("Usage: speeduino-to-mqtt [options]");
+    println!("Usage: ecu-to-mqtt [options]");
     println!();
     println!("Options:");
     println!("  -h, --help               Print this help message");
     println!("  -c, --config FILE        Path to TOML config file");
     println!();
-    println!("Environment variables (SPEEDUINO_ prefix overrides config file):");
-    println!("  SPEEDUINO_ECU_PROTOCOL     ECU profile name (see ECU_PROTOCOLS.md)");
-    println!("  SPEEDUINO_CAN_BASE_ID      CAN identifier override (decimal)");
-    println!("  SPEEDUINO_CONNECTION_TYPE  'serial' (default) or 'tcp'");
-    println!("  SPEEDUINO_PORT_NAME        Serial device path");
-    println!("  SPEEDUINO_BAUD_RATE        Serial baud rate");
-    println!("  SPEEDUINO_TCP_HOST         TCP host (when connection_type=tcp)");
-    println!("  SPEEDUINO_TCP_PORT         TCP port (when connection_type=tcp)");
-    println!("  SPEEDUINO_MQTT_ENABLED     true/false – set false for display-only");
-    println!("  SPEEDUINO_MQTT_HOST        MQTT broker hostname");
-    println!("  SPEEDUINO_MQTT_PORT        MQTT broker port");
-    println!("  SPEEDUINO_LOG_LEVEL        trace|debug|info|warn|error");
+    println!("Environment variables (ECU_TO_MQTT_ prefix overrides config file):");
+    println!("  ECU_TO_MQTT_ECU_PROTOCOL     ECU profile name (see ECU_PROTOCOLS.md)");
+    println!("  ECU_TO_MQTT_CAN_BASE_ID      CAN identifier override (decimal)");
+    println!("  ECU_TO_MQTT_CONNECTION_TYPE  'serial' (default), 'tcp' or 'can'");
+    println!("  ECU_TO_MQTT_PORT_NAME        Serial device path");
+    println!("  ECU_TO_MQTT_BAUD_RATE        Serial baud rate");
+    println!("  ECU_TO_MQTT_TCP_HOST         TCP host (when connection_type=tcp)");
+    println!("  ECU_TO_MQTT_TCP_PORT         TCP port (when connection_type=tcp)");
+    println!("  ECU_TO_MQTT_CAN_INTERFACE    SocketCAN interface, e.g. can0 (Linux)");
+    println!("  ECU_TO_MQTT_MQTT_ENABLED     true/false – set false for display-only");
+    println!("  ECU_TO_MQTT_MQTT_HOST        MQTT broker hostname");
+    println!("  ECU_TO_MQTT_MQTT_PORT        MQTT broker port");
+    println!("  ECU_TO_MQTT_LOG_LEVEL        trace|debug|info|warn|error");
+    println!("  ECU_TO_MQTT_NO_TUI=1         Force service/log mode");
     println!("  .env file is loaded automatically from the working directory");
+    println!();
+    println!("Profiles:");
+    for protocol in ecu_protocol::EcuProtocol::ALL {
+        println!("  {:<24} {}", protocol.name(), protocol.label());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +163,13 @@ async fn ecu_communication_loop(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     if config.ecu_protocol.is_can() {
-        return can_stream::run(config, mqtt_sender, cancel).await;
+        // "can" reads the bus directly (Linux SocketCAN); "tcp" reads the
+        // newline-delimited frames produced by scripts/can_gateway.py.
+        return if config.connection_type.eq_ignore_ascii_case("can") {
+            can_socket::run(config, mqtt_sender, tui_state, cancel).await
+        } else {
+            can_stream::run(config, mqtt_sender, tui_state, cancel).await
+        };
     }
     let mut handler = EcuSerialHandler::new((*config).clone());
 
@@ -232,6 +248,13 @@ async fn ecu_communication_loop(
                 if config.ecu_protocol != ecu_protocol::EcuProtocol::Speeduino {
                     match ecu_protocol::decode_compat112(&data) {
                         Ok(channels) => {
+                            {
+                                let mut s = tui_state.write().await;
+                                s.update_channels(&channels);
+                                if sender_ref.is_some() {
+                                    s.messages_published = s.messages_published.saturating_add(1);
+                                }
+                            }
                             telemetry_frame::publish(
                                 channels,
                                 config.ecu_protocol.source(),
@@ -312,7 +335,7 @@ async fn update_tui_ecu_data(
 
 fn display_welcome() {
     println!("\x1b[1;32m");
-    println!("\nWelcome to Speeduino to MQTT");
+    println!("\nWelcome to ECU to MQTT");
     println!("============================");
     println!("\x1b[1;31m");
     println!("       ______");
@@ -333,7 +356,17 @@ fn display_welcome() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let opts = CliOptions::parse_args_default_or_exit();
+    // Parsed explicitly rather than with parse_args_default_or_exit() so that
+    // `--help` prints the profile list below instead of gumdrop's bare usage.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let opts = match CliOptions::parse_args_default(&args) {
+        Ok(opts) => opts,
+        Err(error) => {
+            eprintln!("{}", error);
+            print_help();
+            std::process::exit(2);
+        }
+    };
     if opts.help {
         print_help();
         std::process::exit(0);
@@ -351,19 +384,18 @@ async fn main() -> anyhow::Result<()> {
     // Shared cancellation token
     let cancel = CancellationToken::new();
 
-    // Detect whether stdin is a TTY – show TUI when running interactively.
-    // SPEEDUINO_NO_TUI=1 forces service/log mode (set by default in Docker).
-    let force_no_tui = std::env::var("SPEEDUINO_NO_TUI")
+    // Detect whether stdout is a TTY – show TUI when running interactively.
+    // ECU_TO_MQTT_NO_TUI=1 forces service/log mode (set by default in Docker).
+    let force_no_tui = std::env::var("ECU_TO_MQTT_NO_TUI")
         .map(|v| v == "1")
         .unwrap_or(false);
-    let is_tty = !force_no_tui
-        && config.ecu_protocol == ecu_protocol::EcuProtocol::Speeduino
-        && atty::is(atty::Stream::Stdout);
+    let is_tty = !force_no_tui && std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     // Shared state for TUI
     let log_buffer: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
     let tui_state: Arc<RwLock<TuiState>> = Arc::new(RwLock::new(TuiState {
         mqtt_enabled: config.mqtt_enabled,
+        protocol: config.ecu_protocol,
         connection_address: config.connection_display(),
         mqtt_address: if config.mqtt_enabled {
             format!("{}:{}", config.mqtt_host, config.mqtt_port)
@@ -383,7 +415,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!(
-        "Configuration loaded; connection={}",
+        "Configuration loaded; profile={}, connection={}",
+        config.ecu_protocol.name(),
         config.connection_display()
     );
 

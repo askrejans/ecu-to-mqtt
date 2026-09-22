@@ -1,19 +1,21 @@
 # ========================================
-# Speeduino-to-MQTT Configuration File
+# ECU-to-MQTT Configuration File
 # ========================================
 #
 # All settings can be overridden with environment variables using the
-# SPEEDUINO_ prefix.  A .env file in the working directory is also loaded
+# ECU_TO_MQTT_ prefix.  A .env file in the working directory is also loaded
 # automatically.
-# Example: SPEEDUINO_PORT_NAME=/dev/ttyUSB0 SPEEDUINO_MQTT_HOST=broker.local
+# Example: ECU_TO_MQTT_PORT_NAME=/dev/ttyUSB0 ECU_TO_MQTT_MQTT_HOST=broker.local
 
 # ========================================
 # Connection Type
 # ========================================
 
 # "serial"  – hardware serial port (default)
-# "tcp"     – raw TCP socket for WiFi bridges (e.g. ESP32, Moxa, USR-VIS410)
-# Env var:  SPEEDUINO_CONNECTION_TYPE
+# "tcp"     – raw TCP socket for WiFi bridges (ESP32, Moxa, USR-VIS410) or for
+#             the CAN gateway (scripts/can_gateway.py)
+# "can"     – native Linux SocketCAN interface, CAN profiles only
+# Env var:  ECU_TO_MQTT_CONNECTION_TYPE
 connection_type = "serial"
 
 # ========================================
@@ -23,11 +25,11 @@ connection_type = "serial"
 
 # The serial device path (Linux/macOS) or COM port (Windows)
 # Examples: "/dev/ttyACM0", "/dev/ttyUSB0", "COM3"
-# Env var:  SPEEDUINO_PORT_NAME
+# Env var:  ECU_TO_MQTT_PORT_NAME
 port_name = "/dev/ttyACM0"
 
-# Baud rate.  Most Speeduino setups use 115200.
-# Env var:  SPEEDUINO_BAUD_RATE
+# Baud rate.  Most Speeduino and MegaSquirt setups use 115200.
+# Env var:  ECU_TO_MQTT_BAUD_RATE
 baud_rate = 115200
 
 # ========================================
@@ -36,23 +38,41 @@ baud_rate = 115200
 # ========================================
 
 # IP address or hostname of the WiFi/Ethernet–serial bridge
-# Env var:  SPEEDUINO_TCP_HOST
+# Env var:  ECU_TO_MQTT_TCP_HOST
 # tcp_host = "192.168.1.100"
 
-# TCP port on the bridge device (commonly 23 or 8080)
-# Env var:  SPEEDUINO_TCP_PORT
+# TCP port on the bridge device (commonly 23 or 8080).
+# For a CAN profile this is the CAN gateway; scripts/can_gateway.py uses 29536.
+# Env var:  ECU_TO_MQTT_TCP_PORT
 # tcp_port = 23
+
+# ========================================
+# CAN Interface Configuration
+# (only used when connection_type = "can", Linux only)
+# ========================================
+
+# SocketCAN interface name. Bring it up with the ECU's bitrate first:
+#   sudo ip link set can0 up type can bitrate 500000
+# Env var:  ECU_TO_MQTT_CAN_INTERFACE
+# can_interface = "can0"
 
 # ========================================
 # ECU Protocol
 # ========================================
 
-# Profile: speeduino, ms2, ms3, ms3_pro, microsquirt, or a CAN profile.
-# See ECU_PROTOCOLS.md for exact compatibility and CAN gateway setup.
-# Env var: SPEEDUINO_ECU_PROTOCOL
+# Serial profiles:
+#   speeduino (default), ms2, ms3, ms3_pro, microsquirt
+# CAN profiles (need connection_type = "can" or a "tcp" CAN gateway):
+#   megasquirt_can_dash, megasquirt_can_realtime, haltech_can_v2,
+#   maxxecu_can_v12, maxxecu_can_v13, ecumaster_emu_can, aemnet_can,
+#   link_generic_dash, link_generic_dash2, motec_m1_pdm
+# See ECU_PROTOCOLS.md for exact compatibility and CAN gateway setup, and
+# examples/ for a ready-made config per profile.
+# Env var: ECU_TO_MQTT_ECU_PROTOCOL
 ecu_protocol = "speeduino"
 
 # Optional CAN base override, only for a CAN profile. TOML accepts hex.
+# The environment override ECU_TO_MQTT_CAN_BASE_ID uses decimal.
 # can_base_id = 0x360
 
 # Speeduino-only expected data packet length in bytes.
@@ -67,21 +87,22 @@ ecu_protocol = "speeduino"
 # ========================================
 
 # Set to false to disable MQTT publishing entirely.
-# When false the application shows live data in the TUI only.
-# Env var:  SPEEDUINO_MQTT_ENABLED
+# When false the application decodes and shows live data in the TUI only.
+# Env var:  ECU_TO_MQTT_MQTT_ENABLED
 mqtt_enabled = true
 
 # MQTT broker host address (IP or hostname)
-# Env var:  SPEEDUINO_MQTT_HOST
+# Env var:  ECU_TO_MQTT_MQTT_HOST
 mqtt_host = "localhost"
 
 # MQTT broker port. Standard: 1883 (plain), 8883 (TLS/SSL)
-# Env var:  SPEEDUINO_MQTT_PORT
+# Env var:  ECU_TO_MQTT_MQTT_PORT
 mqtt_port = 1883
 
-# Base MQTT topic prefix.  All sensor topics are published under this prefix.
-# Example: "/GOLF86/ECU/" → topics like "/GOLF86/ECU/RPM"
-mqtt_base_topic = "/GOLF86/ECU/"
+# Base MQTT topic prefix.  All topics are published under this prefix.
+# Default "/ECU/" → topics like "/ECU/telemetry" and "/ECU/RPM".
+# Use a per-car prefix when several cars share one broker.
+mqtt_base_topic = "/ECU/"
 
 # MQTT Quality of Service level
 # 0 = At most once (fire and forget) – DEFAULT
@@ -90,13 +111,13 @@ mqtt_base_topic = "/GOLF86/ECU/"
 # mqtt_qos = 0
 
 # MQTT Client ID (auto-generated from PID if not set)
-# mqtt_client_id = "speeduino-to-mqtt-12345"
+# mqtt_client_id = "ecu-to-mqtt-12345"
 
 # ========================================
 # MQTT Authentication (Optional)
 # ========================================
 
-# Env vars:  SPEEDUINO_MQTT_USERNAME / SPEEDUINO_MQTT_PASSWORD
+# Env vars:  ECU_TO_MQTT_MQTT_USERNAME / ECU_TO_MQTT_MQTT_PASSWORD
 # mqtt_username = "your_username"
 # mqtt_password = "your_password"
 
@@ -141,7 +162,7 @@ refresh_rate_ms = 20
 # ========================================
 
 # trace | debug | info | warn | error
-# Env var:  SPEEDUINO_LOG_LEVEL
+# Env var:  ECU_TO_MQTT_LOG_LEVEL
 log_level = "info"
 
 # Enable JSON-formatted logs (useful for log aggregation / Grafana Loki)

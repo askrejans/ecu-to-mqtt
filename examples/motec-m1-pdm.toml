@@ -1,0 +1,11 @@
+# MoTeC M1 GPx 1.4 published PDM messages on 0x118 / 0x119.
+# This is the limited PDM stream: RPM has 100 RPM resolution and there is no
+# lambda or battery channel. Not a general MoTeC telemetry decoder.
+ecu_protocol = "motec_m1_pdm"
+connection_type = "tcp"
+tcp_host = "127.0.0.1"
+tcp_port = 29536
+can_base_id = 0x118
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/g86/car-1/ecu/"

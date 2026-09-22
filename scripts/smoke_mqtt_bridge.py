@@ -114,7 +114,8 @@ log_level = "warn"
             '-t', topic, '-C', '1', '-W', '10'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         process = None
         try:
-            environment = {key: value for key, value in os.environ.items() if not key.startswith('SPEEDUINO_')}
+            environment = {key: value for key, value in os.environ.items()
+                           if not key.startswith('ECU_TO_MQTT_')}
             process = subprocess.Popen([str(binary), '--config', str(config)], cwd=directory,
                 env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             output, error = subscriber.communicate(timeout=12)
@@ -139,7 +140,7 @@ log_level = "warn"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--binary', type=Path, default=Path(__file__).resolve().parents[1] / 'target/debug/speeduino-to-mqtt')
+    parser.add_argument('--binary', type=Path, default=Path(__file__).resolve().parents[1] / 'target/debug/ecu-to-mqtt')
     args = parser.parse_args()
     for command in ('mosquitto', 'mosquitto_sub'):
         if not shutil.which(command):

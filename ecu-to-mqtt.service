@@ -1,6 +1,6 @@
 [Unit]
-Description=Speeduino ECU to MQTT Bridge
-Documentation=https://github.com/askrejans/speeduino-to-mqtt
+Description=ECU to MQTT Bridge (Speeduino, MegaSquirt, CAN profiles)
+Documentation=https://github.com/askrejans/ecu-to-mqtt
 After=network-online.target
 Wants=network-online.target
 StartLimitBurst=5
@@ -8,11 +8,11 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=simple
-User=speeduino
-Group=speeduino
+User=ecu-to-mqtt
+Group=ecu-to-mqtt
 
 # Path to the binary
-ExecStart=/usr/bin/speeduino-to-mqtt --config /etc/speeduino-to-mqtt/settings.toml
+ExecStart=/usr/bin/ecu-to-mqtt --config /etc/ecu-to-mqtt/settings.toml
 
 # Working directory (app writes no state; /tmp is always available)
 WorkingDirectory=/tmp
@@ -57,11 +57,11 @@ SystemCallErrorNumber=EPERM
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=speeduino-to-mqtt
+SyslogIdentifier=ecu-to-mqtt
 
 # Environment variables (optional - can also use settings.toml)
-# Environment="SPEEDUINO_LOG_LEVEL=info"
-# Environment="SPEEDUINO_MQTT_HOST=mqtt.local"
+# Environment="ECU_TO_MQTT_LOG_LEVEL=info"
+# Environment="ECU_TO_MQTT_MQTT_HOST=mqtt.local"
 
 [Install]
 WantedBy=multi-user.target

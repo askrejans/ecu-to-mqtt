@@ -1,8 +1,11 @@
-# ECU protocols — version 0.4.0
+# ECU protocols — version 0.5.0
 
-This version adds read-only telemetry from MegaSquirt and six additional ECU
-families to the existing Speeduino bridge. The project, executable, service,
-environment prefix and default MQTT topic retain their existing names.
+The bridge reads telemetry from Speeduino, MegaSquirt and six additional ECU
+families, read-only. Version 0.5.0 renamed the project from
+`speeduino-to-mqtt` to `ecu-to-mqtt`. Protocol names, configuration keys and the
+canonical JSON schema are unchanged, but the environment prefix is now
+`ECU_TO_MQTT_` and the default base topic is `/ECU/`; update any service unit,
+`.env` file or broker ACL that relied on the old names.
 
 Select the **broadcast protocol configured in the ECU**, not just its brand.
 CAN layouts are manufacturer-specific. A CAN socket is not an automatic decoder
@@ -18,16 +21,16 @@ commands. Sensor availability depends on ECU firmware, wiring and configuration.
 | `ms3` | MS3 1.2+ compatibility output | Serial or raw serial-over-TCP | Same compatibility subset |
 | `ms3_pro` | MS3Pro with the MS3 compatibility command | Serial or raw serial-over-TCP | Same compatibility subset |
 | `microsquirt` | MicroSquirt running compatible MS2/Extra firmware | Serial or raw serial-over-TCP | Same compatibility subset |
-| `megasquirt_can_dash` | MegaSquirt dash broadcasting enabled | CAN gateway; 11-bit, normally 500 kbit/s; `1512` (`0x5E8`) | RPM, TPS, MAP, coolant, intake, battery, ignition, AFR |
-| `megasquirt_can_realtime` | MegaSquirt realtime broadcasting, groups 0–3 enabled | CAN gateway; 11-bit, normally 500 kbit/s; `1520` (`0x5F0`) | Same channels, using the different realtime layout |
-| `haltech_can_v2` | Haltech documented V2 stream, including compatible Elite / Nexus configurations | CAN gateway; 11-bit, 1 Mbit/s; `0x360` | RPM, TPS, MAP, fuel/oil/brake pressure, ignition, lambda 1/2, speed, gear, battery, coolant/intake/fuel temperatures, lateral/longitudinal G |
-| `maxxecu_can_v12` | MaxxECU default CAN 1.2 | CAN gateway; 11-bit, 500 kbit/s; `0x520` | RPM, TPS, MAP, lambda, ignition, speed, battery, intake, coolant, gear |
-| `maxxecu_can_v13` | MaxxECU default CAN 1.3 | CAN gateway; 11-bit, 500 kbit/s; `0x520` | 1.2 channels plus oil/fuel pressure, oil temperature, brake/clutch switches and G |
-| `ecumaster_emu_can` | EMU PRO / EMU Black compatible EMU CAN stream | CAN gateway; 11-bit; `0x600`; match the configured ECU port bitrate | RPM, TPS, MAP, intake/coolant/oil temperatures, speed, oil/fuel pressure, ignition, lambda, gear, battery |
-| `aemnet_can` | AEMnet v150609 ECU stream (Infinity with matching output) | CAN gateway; **29-bit extended**, 500 kbit/s; `0x01F0A000` | RPM, TPS, intake/coolant/oil temperatures, lambda 1/2, speed, gear, ignition, battery, MAP, fuel/oil pressure |
-| `link_generic_dash` | Link / Vi-PEC **Generic Dash** stream | CAN gateway; 11-bit, configured ECU bitrate and ID; default ID `1000` | RPM, MAP, TPS, coolant/intake/oil temperatures, battery, gear, ignition, lambda 1/2, fuel/oil pressure, four wheel speeds |
-| `link_generic_dash2` | Link **Generic Dash 2 / Race Technology Dash2Pro** stream | CAN gateway; 11-bit, configured bitrate; default base `1000`, four consecutive IDs | RPM, **gauge boost**, TPS, coolant/intake/oil temperatures, battery, ignition, driven-wheel speed, oil/fuel pressure, lambda 1/2, gear |
-| `motec_m1_pdm` | MoTeC M1 GPx 1.4 published PDM output | CAN gateway; 11-bit, configured ECU bitrate; `0x118` / `0x119` | RPM at **100 RPM resolution**, TPS, speed, coolant/oil/fuel/transmission/differential temperatures, brake/clutch switches |
+| `megasquirt_can_dash` | MegaSquirt dash broadcasting enabled | Native SocketCAN or CAN gateway; 11-bit, normally 500 kbit/s; `1512` (`0x5E8`) | RPM, TPS, MAP, coolant, intake, battery, ignition, AFR |
+| `megasquirt_can_realtime` | MegaSquirt realtime broadcasting, groups 0–3 enabled | Native SocketCAN or CAN gateway; 11-bit, normally 500 kbit/s; `1520` (`0x5F0`) | Same channels, using the different realtime layout |
+| `haltech_can_v2` | Haltech documented V2 stream, including compatible Elite / Nexus configurations | Native SocketCAN or CAN gateway; 11-bit, 1 Mbit/s; `0x360` | RPM, TPS, MAP, fuel/oil/brake pressure, ignition, lambda 1/2, speed, gear, battery, coolant/intake/fuel temperatures, lateral/longitudinal G |
+| `maxxecu_can_v12` | MaxxECU default CAN 1.2 | Native SocketCAN or CAN gateway; 11-bit, 500 kbit/s; `0x520` | RPM, TPS, MAP, lambda, ignition, speed, battery, intake, coolant, gear |
+| `maxxecu_can_v13` | MaxxECU default CAN 1.3 | Native SocketCAN or CAN gateway; 11-bit, 500 kbit/s; `0x520` | 1.2 channels plus oil/fuel pressure, oil temperature, brake/clutch switches and G |
+| `ecumaster_emu_can` | EMU PRO / EMU Black compatible EMU CAN stream | Native SocketCAN or CAN gateway; 11-bit; `0x600`; match the configured ECU port bitrate | RPM, TPS, MAP, intake/coolant/oil temperatures, speed, oil/fuel pressure, ignition, lambda, gear, battery |
+| `aemnet_can` | AEMnet v150609 ECU stream (Infinity with matching output) | Native SocketCAN or CAN gateway; **29-bit extended**, 500 kbit/s; `0x01F0A000` | RPM, TPS, intake/coolant/oil temperatures, lambda 1/2, speed, gear, ignition, battery, MAP, fuel/oil pressure |
+| `link_generic_dash` | Link / Vi-PEC **Generic Dash** stream | Native SocketCAN or CAN gateway; 11-bit, configured ECU bitrate and ID; default ID `1000` | RPM, MAP, TPS, coolant/intake/oil temperatures, battery, gear, ignition, lambda 1/2, fuel/oil pressure, four wheel speeds |
+| `link_generic_dash2` | Link **Generic Dash 2 / Race Technology Dash2Pro** stream | Native SocketCAN or CAN gateway; 11-bit, configured bitrate; default base `1000`, four consecutive IDs | RPM, **gauge boost**, TPS, coolant/intake/oil temperatures, battery, ignition, driven-wheel speed, oil/fuel pressure, lambda 1/2, gear |
+| `motec_m1_pdm` | MoTeC M1 GPx 1.4 published PDM output | Native SocketCAN or CAN gateway; 11-bit, configured ECU bitrate; `0x118` / `0x119` | RPM at **100 RPM resolution**, TPS, speed, coolant/oil/fuel/transmission/differential temperatures, brake/clutch switches |
 
 The serial MegaSquirt profiles request the documented `61 00 06` command and
 require the complete 112-byte compatibility reply. They do not decode arbitrary
@@ -43,9 +46,40 @@ Link Generic Dash and Generic Dash 2 have different byte order and scaling and
 must not be interchanged. Dash 2's driven-speed field occupies one byte, so its
 wire range is 0–255 km/h despite the wider range printed in PCLink's help table.
 
-## Connect a CAN adapter
+## Read the CAN bus directly (Linux)
 
-The Rust process accepts newline-delimited CAN frames over TCP. The included
+With `connection_type = "can"` the bridge opens a SocketCAN interface itself and
+needs no helper process:
+
+```toml
+ecu_protocol = "haltech_can_v2"
+connection_type = "can"
+can_interface = "can0"
+```
+
+Bring the interface up first, with the bitrate the ECU is configured for — that
+is a privileged operation and stays outside this program:
+
+```sh
+sudo ip link set can0 up type can bitrate 1000000      # real adapter
+sudo modprobe vcan && sudo ip link add dev vcan0 type vcan \
+  && sudo ip link set up vcan0                          # virtual bus for testing
+```
+
+The socket is receive-only and is never written to. Error, remote and CAN FD
+frames are ignored, as are frames whose identifier width does not match the
+profile. Kernel receive timestamps are requested, so a frame that waited in the
+socket queue is rejected as stale rather than republished as live telemetry;
+when the interface cannot provide them, arrival time is used. A missing or
+downed interface is retried with backoff instead of exiting, so the service may
+start before the CAN device exists. USB adapters that present a serial SLCAN
+device must be attached with `slcand` first, or read through the gateway below.
+
+## Connect a CAN adapter through the gateway
+
+Use the gateway on macOS and Windows, or with any adapter python-can supports
+but the kernel does not. The Rust process accepts newline-delimited CAN frames
+over TCP. The included
 gateway receives frames using [python-can](https://python-can.readthedocs.io/en/stable/bus.html)
 and supports its SocketCAN, PCAN, Kvaser, SLCAN and other installed backends.
 Install the adapter's driver, set the correct bitrate, enable the desired ECU
@@ -59,7 +93,7 @@ python3 -m venv .venv
 # Linux SocketCAN example; configure can0's bitrate before starting it.
 .venv/bin/python scripts/can_gateway.py --interface socketcan --channel can0 --bitrate 1000000
 # In a second terminal:
-cargo run -- --config examples/haltech-can.toml
+cargo run -- --config examples/haltech-can-v2.toml
 ```
 
 For Windows, the virtualenv interpreter is `.venv\Scripts\python.exe`; an example
@@ -68,9 +102,11 @@ For a supported macOS SLCAN adapter use `--interface slcan --channel
 /dev/tty.usbserial-ADAPTER --bitrate 500000`. Backend availability depends on the
 adapter and OS. These adapter combinations have not been hardware-tested here.
 
-Use the same CAN gateway with any CAN profile by changing `ecu_protocol` and,
-only if the ECU output is configured differently, `can_base_id`. TOML permits
-hexadecimal IDs; `SPEEDUINO_CAN_BASE_ID` environment overrides use decimal.
+Either transport works with any CAN profile: change `ecu_protocol` and,
+only if the ECU output is configured differently, `can_base_id`. The `examples/`
+directory has a ready-made config for every profile in the table above. TOML
+permits hexadecimal IDs; `ECU_TO_MQTT_CAN_BASE_ID` environment overrides use
+decimal.
 The default gateway listens on **127.0.0.1:29536**. It has no authentication or
 encryption; keep it on loopback or carry it through an authenticated tunnel.
 Broker TLS is configured separately in the Rust bridge.
@@ -116,15 +152,18 @@ is a binary signal and is not presented as measured pedal percentage. Unsupporte
 or invalid readings are omitted, not replaced with zeros.
 
 In G86 Pro, save the broker hostname, port, credentials and **ECU topic prefix**
-to match this configuration. For `examples/haltech-can.toml`, use
+to match this configuration. For `examples/haltech-can-v2.toml`, use
 `/g86/car-1/ecu`. Use `mqtts://` and port 8883 for a remote TLS broker. Each car
 needs a distinct topic and broker ACL; do not publish several cars to one prefix.
-Credentials can be supplied using `SPEEDUINO_MQTT_USERNAME` and
-`SPEEDUINO_MQTT_PASSWORD` rather than committed configuration files.
+Credentials can be supplied using `ECU_TO_MQTT_MQTT_USERNAME` and
+`ECU_TO_MQTT_MQTT_PASSWORD` rather than committed configuration files.
 
-The existing interactive terminal dashboard remains Speeduino-specific.
-Other profiles use the MQTT path and structured logs; `log_level = "debug"`
-shows decoded channel counts. `mqtt_enabled = false` decodes without publishing.
+The interactive terminal dashboard works with every profile. Speeduino keeps its
+full parameter panel; the other profiles show the canonical channels decoded
+from their serial or CAN stream and dim any channel that has not been refreshed
+for two seconds, the same expiry the MQTT consumers apply. Structured logs
+remain available in service mode; `log_level = "debug"` shows decoded channel
+counts, and `mqtt_enabled = false` decodes without publishing.
 
 ## Primary protocol references
 
@@ -141,7 +180,7 @@ not redistributed in this repository.
 - [Link PCLink official download](https://linkecu.com/software-support/pc-link-downloads/): PCLink 7.8.2 English Help, **CAN → Device Specific CAN Information → Generic Dash / Generic Dash 2**, including compound groups, endianness and scale factors.
 - [MoTeC M1 to PDM messaging](https://assets.motec.com.au/strapi/M1_To_PDM_CAN_Messaging_fd06806969.pdf): GPx 1.4 PDM messages. This is the limited published PDM stream, not universal MoTeC telemetry.
 
-## Verification and remaining bench work
+## Verification and remaining testing work
 
 Run `cargo test`, `cargo clippy --all-targets` and
 `python3 -m unittest discover -s scripts -p 'test_can_gateway.py'`.
@@ -150,13 +189,118 @@ After `cargo build`, install Mosquitto's broker and client CLI tools and run
 broker and exercises all 15 profiles through the compiled process to an actual
 MQTT subscriber. It stops its processes and removes its temporary configs on exit.
 Tests cover scale/sign conversion, frame boundaries, both identifier widths,
-fragmented TCP input, stale frame rejection, serial command/reply forwarding and
-canonical MQTT envelopes. Test vectors are derived from the published layouts,
+fragmented TCP input, stale frame rejection, serial command/reply forwarding,
+canonical MQTT envelopes, environment-prefix precedence, the shipped example
+configs and the terminal dashboard for every profile. Test vectors are derived
+from the published layouts,
 not captures from each physical ECU. Physical controller/adapter testing,
 firmware-specific availability and on-car comparison with the manufacturer's
-software remain required before claiming hardware certification.
+software are needed for all ECUs apart from Speeduino. Build using the provided spec sheets.
 
-Local verification on 22 September 2026: 90 Rust tests and two gateway tests
-passed; the compiled bridge passed the local broker smoke test. Clippy completed
-with existing style warnings in legacy configuration, parser, MQTT and TUI code;
-it is not a warning-free build. No packages have been uploaded for this version.
+## Speeduino scalar topics
+
+The Speeduino profile publishes every parameter as a short code under the
+configured base topic (for example `/ECU/RPM`) in addition to the canonical
+`/telemetry` envelope. Other profiles publish the canonical topic only.
+
+### Engine basics
+| Code | Description |
+|---|---|
+| `RPM` | Engine speed (rev/min) |
+| `TPS` | Throttle position (0–255 raw) |
+| `MAP` | Manifold absolute pressure (kPa) |
+| `BAR` | Barometric pressure (kPa) |
+| `BAT` | Battery voltage (V, 1 dp) |
+| `SCL` | Loop counter (secl) |
+| `SYN` | Sync loss counter |
+
+### Temperatures
+| Code | Description |
+|---|---|
+| `IAT` | Intake air temperature (°C) |
+| `CLT` | Coolant temperature (°C) |
+| `MAT` | IAT raw byte (backward-compatible) |
+| `CAD` | Coolant raw byte (backward-compatible) |
+| `FTP` | Fuel temperature (°C) |
+
+### O2 / AFR
+| Code | Description |
+|---|---|
+| `O2P` | Primary O2 sensor |
+| `O2S` | Secondary O2 sensor |
+| `AFT` | AFR target (real units, 1 dp) |
+
+### Fuel and injection
+| Code | Description |
+|---|---|
+| `VE1` / `VE2` / `VEC` | Volumetric efficiency current / table 1 / table 2 |
+| `PW1`–`PW4` | Injector pulse width channels 1–4 (ms, 1 dp) |
+| `PW5`–`PW8` | Channels 5–8 (138-byte firmware packets only) |
+| `FLD` | Fuel load |
+| `FTC` | Fuel temp correction |
+
+### Ignition
+| Code | Description |
+|---|---|
+| `ADV` / `AD1` / `AD2` | Ignition advance (degrees) |
+| `DWL` | Dwell time (ms, 1 dp) |
+| `SPK` | Spark status bitfield |
+| `IGD` | Ignition load |
+
+### Corrections
+| Code | Description |
+|---|---|
+| `COR` | Combined corrections |
+| `BTC` | Battery correction |
+| `EGC` | EGO (O2) correction |
+| `ITC` | IAT correction |
+| `WEC` | Warm-up enrichment correction |
+| `BRC` | Baro correction |
+| `ASE` | After-start enrichment |
+| `TAE` | Transient acceleration enrichment (%) |
+
+### Flex fuel
+| Code | Description |
+|---|---|
+| `ETH` | Ethanol % |
+| `FLC` | Flex fuel correction |
+| `FIC` | Flex ignition correction |
+| `FBC` | Flex boost correction |
+
+### Boost and VVT
+| Code | Description |
+|---|---|
+| `BST` | Boost target (kPa) |
+| `BSD` | Boost duty cycle (%) |
+| `VA1` / `VA2` | VVT 1/2 actual angle |
+| `VT1` / `VT2` | VVT 1/2 target angle |
+| `VD1` / `VD2` | VVT 1/2 duty cycle |
+
+### CAN inputs
+| Code | Description |
+|---|---|
+| `CN01`–`CN16` | Speeduino CAN input channels 1–16 (u16 each) |
+
+### Miscellaneous
+| Code | Description |
+|---|---|
+| `VSS` | Vehicle speed |
+| `GER` | Current gear |
+| `FPR` | Fuel pressure |
+| `OPR` | Oil pressure |
+| `ILL` | Idle load |
+| `MPD` | MAP dot (rate of change) |
+| `TPD` | TPS dot |
+| `TAD` | TPS ADC |
+| `CIT` | Closed-loop idle target |
+| `WMI` | WMI pulse width |
+| `LPS` | Loops per second |
+| `FRM` | Free RAM |
+| `RPD` | RPM dot |
+| `TOF` | Test output flags |
+| `NER` | Next error code |
+| `STA` / `ENG` / `ST3` / `ST4` | Status bitfields |
+| `EPS` | Engine protect status |
+| `OUT` | Output status |
+| `SDS` | SD card / TunerStudio status |
+| `EMP` | EMAP pressure (packets ≥ 121 bytes) |

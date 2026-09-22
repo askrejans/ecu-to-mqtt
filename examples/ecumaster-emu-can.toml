@@ -1,0 +1,12 @@
+# ECUMaster EMU PRO / EMU Black CAN stream, base 0x600.
+# Match the gateway bitrate to the configured ECU port: EMU PRO CAN1 is
+# 1 Mbit/s, CAN2 is configurable. EMU Black V3 needs firmware 3.047+ for the
+# corrected TPS broadcast.
+ecu_protocol = "ecumaster_emu_can"
+connection_type = "tcp"
+tcp_host = "127.0.0.1"
+tcp_port = 29536
+can_base_id = 0x600
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/g86/car-1/ecu/"

@@ -1,0 +1,13 @@
+# Speeduino primary serial 'A' output — the original profile.
+# Publishes the legacy scalar topics (RPM, MAP, CLT …) plus the canonical
+# /telemetry envelope, and drives the full terminal dashboard.
+ecu_protocol = "speeduino"
+connection_type = "serial"
+port_name = "/dev/ttyACM0"
+baud_rate = 115200
+# 130 = speeduino-serial-sim, 138 = current firmware LOG_ENTRY_SIZE.
+expected_data_length = 130
+refresh_rate_ms = 20
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/g86/car-1/ecu/"

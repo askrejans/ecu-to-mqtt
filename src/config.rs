@@ -1,16 +1,20 @@
 //! Configuration management module
 //!
 //! Handles loading, validation, and environment variable overrides for application configuration.
-//! Supports `.env` files via dotenvy, TOML config files, and `SPEEDUINO_*` env var overrides.
+//! Supports `.env` files via dotenvy, TOML config files, and `ECU_TO_MQTT_*` env var overrides.
 
 use crate::errors::{ConfigError, Result};
 use config::{Config, Environment, File};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
 /// Valid baud rates for serial communication
 const VALID_BAUD_RATES: &[u32] = &[9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+
+/// Prefix for environment variable overrides, e.g. `ECU_TO_MQTT_MQTT_HOST`.
+pub const ENV_PREFIX: &str = "ECU_TO_MQTT";
 
 /// Main application configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,9 +26,13 @@ pub struct AppConfig {
     #[serde(default)]
     pub can_base_id: Option<u32>,
     // --- Connection type ---
-    /// Connection type: "serial" (hardware UART) or "tcp" (raw TCP socket / WiFi bridge)
+    /// Connection type: "serial" (hardware UART), "tcp" (raw TCP socket / WiFi
+    /// bridge / CAN gateway) or "can" (native SocketCAN interface, Linux only)
     #[serde(default = "default_connection_type")]
     pub connection_type: String,
+
+    /// SocketCAN interface for `connection_type = "can"`, e.g. "can0" or "vcan0".
+    pub can_interface: Option<String>,
 
     /// TCP host for "tcp" connection_type (e.g. "192.168.1.100" or WiFi bridge hostname)
     pub tcp_host: Option<String>,
@@ -63,7 +71,7 @@ pub struct AppConfig {
     #[serde(default = "default_mqtt_port")]
     pub mqtt_port: u16,
 
-    /// Base MQTT topic prefix (e.g. "/GOLF86/ECU/")
+    /// Base MQTT topic prefix (e.g. "/ECU/")
     #[serde(default = "default_mqtt_base_topic")]
     pub mqtt_base_topic: String,
 
@@ -156,7 +164,7 @@ fn default_mqtt_port() -> u16 {
     1883
 }
 fn default_mqtt_base_topic() -> String {
-    "/speeduino/ecu/".to_string()
+    "/ECU/".to_string()
 }
 fn default_mqtt_qos() -> i32 {
     0
@@ -186,6 +194,7 @@ impl Default for AppConfig {
             ecu_protocol: crate::ecu_protocol::EcuProtocol::default(),
             can_base_id: None,
             connection_type: default_connection_type(),
+            can_interface: None,
             tcp_host: None,
             tcp_port: None,
             port_name: default_port_name(),
@@ -220,12 +229,19 @@ impl AppConfig {
     /// Validate all configuration values against acceptable ranges and constraints.
     pub fn validate(&self) -> Result<()> {
         debug!("Validating configuration");
-        if self.ecu_protocol.is_can()
-            && (self.connection_type != "tcp" || self.tcp_host.is_none() || self.tcp_port.is_none())
-        {
+        let connection = self.connection_type.to_lowercase();
+        if self.ecu_protocol.is_can() && connection != "can" && connection != "tcp" {
             return Err(ConfigError::ValidationFailed(
-                "CAN profiles require a TCP CAN gateway (tcp_host/tcp_port)".into(),
+                "CAN profiles require connection_type = \"can\" (SocketCAN) or \"tcp\" (CAN gateway)"
+                    .into(),
             )
+            .into());
+        }
+        if !self.ecu_protocol.is_can() && connection == "can" {
+            return Err(ConfigError::ValidationFailed(format!(
+                "connection_type = \"can\" needs a CAN profile; {} is a serial protocol",
+                self.ecu_protocol.name()
+            ))
             .into());
         }
         if self.can_base_id.is_some_and(|id| {
@@ -244,7 +260,20 @@ impl AppConfig {
             .into());
         }
 
-        match self.connection_type.to_lowercase().as_str() {
+        match connection.as_str() {
+            "can" => {
+                if self
+                    .can_interface
+                    .as_deref()
+                    .map(|name| name.trim().is_empty())
+                    .unwrap_or(true)
+                {
+                    return Err(ConfigError::MissingField(
+                        "can_interface (required when connection_type = \"can\")".to_string(),
+                    )
+                    .into());
+                }
+            }
             "serial" => {
                 if self.port_name.is_empty() {
                     return Err(ConfigError::MissingField("port_name".to_string()).into());
@@ -279,7 +308,7 @@ impl AppConfig {
             other => {
                 return Err(ConfigError::InvalidValue {
                     field: "connection_type".to_string(),
-                    message: format!("must be \"serial\" or \"tcp\", got \"{}\"", other),
+                    message: format!("must be \"serial\", \"tcp\" or \"can\", got \"{}\"", other),
                 }
                 .into());
             }
@@ -324,16 +353,15 @@ impl AppConfig {
                 }
                 .into());
             }
-            if self.mqtt_use_tls {
-                if let Some(ref ca_path) = self.mqtt_ca_cert_path {
-                    if !Path::new(ca_path).exists() {
-                        return Err(ConfigError::InvalidValue {
-                            field: "mqtt_ca_cert_path".to_string(),
-                            message: format!("file does not exist: {}", ca_path),
-                        }
-                        .into());
-                    }
+            if self.mqtt_use_tls
+                && let Some(ref ca_path) = self.mqtt_ca_cert_path
+                && !Path::new(ca_path).exists()
+            {
+                return Err(ConfigError::InvalidValue {
+                    field: "mqtt_ca_cert_path".to_string(),
+                    message: format!("file does not exist: {}", ca_path),
                 }
+                .into());
             }
             if self.message_buffer_size == 0 {
                 return Err(ConfigError::InvalidValue {
@@ -392,6 +420,7 @@ impl AppConfig {
     /// Returns a human-readable description of the ECU connection endpoint.
     pub fn connection_display(&self) -> String {
         match self.connection_type.to_lowercase().as_str() {
+            "can" => format!("CAN {}", self.can_interface.as_deref().unwrap_or("?")),
             "tcp" => format!(
                 "TCP {}:{}",
                 self.tcp_host.as_deref().unwrap_or("?"),
@@ -430,10 +459,48 @@ impl AppConfig {
     }
 }
 
-/// Load application configuration from `.env`, TOML files, and `SPEEDUINO_*` environment variables.
+/// Environment override source. `overrides` replaces the process environment in
+/// tests; `None` reads the real environment.
+fn env_source(overrides: Option<HashMap<String, String>>) -> Environment {
+    // No separator: ECU_TO_MQTT_MQTT_ENABLED → "mqtt_enabled" (flat key).
+    // With separator("_") the crate converts underscores to dots producing
+    // nested keys like "mqtt.enabled" which don't match the flat struct fields.
+    Environment::with_prefix(ENV_PREFIX)
+        .try_parsing(true)
+        .source(overrides)
+}
+
+/// Config file locations, lowest priority first.
+fn candidate_paths() -> Vec<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = [
+        "/usr/etc/g86-car-telemetry/ecu-to-mqtt.toml",
+        "/etc/g86-car-telemetry/ecu-to-mqtt.toml",
+        "/etc/ecu-to-mqtt/settings.toml",
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .collect();
+
+    // Directory containing the executable (covers `cargo install` and
+    // installed service binaries).
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        candidates.push(parent.join("settings.toml"));
+        candidates.push(parent.join("ecu-to-mqtt.toml"));
+    }
+
+    // Current working directory (highest priority — developer / manual run).
+    for name in ["./settings.toml", "./ecu-to-mqtt.toml"] {
+        candidates.push(std::path::PathBuf::from(name));
+    }
+    candidates
+}
+
+/// Load application configuration from `.env`, TOML files, and environment variables.
 ///
 /// Priority (highest to lowest):
-/// 1. `SPEEDUINO_*` environment variables
+/// 1. `ECU_TO_MQTT_*` environment variables
 /// 2. Specified config file (via `config_path` argument)
 /// 3. Default config file locations
 /// 4. Built-in defaults
@@ -450,32 +517,9 @@ pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig> {
         builder = builder.add_source(File::with_name(path).required(true));
         Some(path.to_string())
     } else {
-        // Build a prioritised list of candidate paths.
         // Earlier entries have lower priority (later sources override earlier ones
         // in the `config` crate), so list most-specific last.
-        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-
-        // 1. System-wide locations (lowest priority)
-        for loc in &[
-            "/usr/etc/g86-car-telemetry/speeduino-to-mqtt.toml",
-            "/etc/g86-car-telemetry/speeduino-to-mqtt.toml",
-            "/etc/speeduino-to-mqtt/settings.toml",
-        ] {
-            candidates.push(std::path::PathBuf::from(loc));
-        }
-
-        // 2. Directory containing the executable (covers `cargo install` and
-        //    installed service binaries).
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                candidates.push(parent.join("settings.toml"));
-                candidates.push(parent.join("speeduino-to-mqtt.toml"));
-            }
-        }
-
-        // 3. Current working directory (highest priority — developer / manual run).
-        candidates.push(std::path::PathBuf::from("./settings.toml"));
-        candidates.push(std::path::PathBuf::from("./speeduino-to-mqtt.toml"));
+        let candidates = candidate_paths();
 
         let mut found_path = None;
         for path in &candidates {
@@ -493,11 +537,7 @@ pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig> {
         found_path
     };
 
-    // SPEEDUINO_* environment variable overrides.
-    // No separator: SPEEDUINO_MQTT_ENABLED → "mqtt_enabled" (flat key).
-    // With separator("_") the crate converts underscores to dots producing
-    // nested keys like "mqtt.enabled" which don't match the flat struct fields.
-    builder = builder.add_source(Environment::with_prefix("SPEEDUINO").try_parsing(true));
+    builder = builder.add_source(env_source(None));
 
     let settings = builder
         .build()
@@ -522,24 +562,136 @@ pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn shipped_ecu_examples_are_valid() {
-        for content in [
-            include_str!("../examples/haltech-can.toml"),
-            include_str!("../examples/megasquirt-serial.toml"),
-            include_str!("../examples/aemnet-can.toml"),
-        ] {
-            let config: AppConfig = Config::builder()
-                .add_source(File::from_str(content, config::FileFormat::Toml))
-                .build()
-                .unwrap()
-                .try_deserialize()
-                .unwrap();
-            config.validate().unwrap();
-        }
-    }
+    use crate::ecu_protocol::EcuProtocol;
     use std::fs;
     use tempfile::tempdir;
+
+    fn parse_toml(content: &str) -> AppConfig {
+        Config::builder()
+            .add_source(File::from_str(content, config::FileFormat::Toml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap()
+    }
+
+    /// Every shipped example must load and validate, so a new demo config
+    /// cannot ship with a profile/connection combination the binary rejects.
+    #[test]
+    fn shipped_ecu_examples_are_valid() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
+        let mut checked = 0;
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let config = parse_toml(&fs::read_to_string(&path).unwrap());
+            config
+                .validate()
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            checked += 1;
+        }
+        assert!(
+            checked >= 15,
+            "expected one example per profile, got {checked}"
+        );
+    }
+
+    /// One example per supported profile, so every ECU has a demo config.
+    #[test]
+    fn every_profile_has_an_example_config() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
+        let mut seen: Vec<EcuProtocol> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                (path.extension().and_then(|e| e.to_str()) == Some("toml"))
+                    .then(|| parse_toml(&fs::read_to_string(&path).unwrap()).ecu_protocol)
+            })
+            .collect();
+        for protocol in EcuProtocol::ALL {
+            assert!(
+                seen.contains(&protocol),
+                "no example config uses {}",
+                protocol.name()
+            );
+        }
+        seen.sort_by_key(|p| p.name());
+        seen.dedup();
+        assert_eq!(seen.len(), EcuProtocol::ALL.len());
+    }
+
+    #[test]
+    fn environment_variables_override_every_field() {
+        let overrides = HashMap::from([
+            ("ECU_TO_MQTT_CONNECTION_TYPE".to_string(), "tcp".to_string()),
+            (
+                "ECU_TO_MQTT_TCP_HOST".to_string(),
+                "192.168.1.100".to_string(),
+            ),
+            ("ECU_TO_MQTT_TCP_PORT".to_string(), "29536".to_string()),
+            (
+                "ECU_TO_MQTT_ECU_PROTOCOL".to_string(),
+                "haltech_can_v2".to_string(),
+            ),
+            ("ECU_TO_MQTT_MQTT_ENABLED".to_string(), "false".to_string()),
+            ("ECU_TO_MQTT_CAN_BASE_ID".to_string(), "864".to_string()),
+        ]);
+        let config: AppConfig = Config::builder()
+            .add_source(env_source(Some(overrides)))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(config.ecu_protocol, EcuProtocol::HaltechCanV2);
+        assert_eq!(config.tcp_host.as_deref(), Some("192.168.1.100"));
+        assert_eq!(config.tcp_port, Some(29536));
+        assert_eq!(config.can_base_id, Some(0x360));
+        assert!(!config.mqtt_enabled);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn environment_variables_take_priority_over_the_config_file() {
+        let config: AppConfig = Config::builder()
+            .add_source(File::from_str(
+                "mqtt_host = \"file.local\"\nmqtt_port = 1883\n",
+                config::FileFormat::Toml,
+            ))
+            .add_source(env_source(Some(HashMap::from([(
+                "ECU_TO_MQTT_MQTT_HOST".to_string(),
+                "env.local".to_string(),
+            )]))))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(config.mqtt_host, "env.local");
+        assert_eq!(config.mqtt_port, 1883);
+    }
+
+    #[test]
+    fn config_is_looked_up_under_the_project_name() {
+        let paths: Vec<String> = candidate_paths()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        assert!(paths.contains(&"/etc/ecu-to-mqtt/settings.toml".to_string()));
+        assert!(paths.contains(&"./settings.toml".to_string()));
+        // System-wide files are read first so a local file wins.
+        let system = paths
+            .iter()
+            .position(|p| p == "/etc/ecu-to-mqtt/settings.toml")
+            .unwrap();
+        let local = paths.iter().position(|p| p == "./settings.toml").unwrap();
+        assert!(system < local);
+    }
+
+    #[test]
+    fn default_topic_is_generic() {
+        assert_eq!(AppConfig::default().mqtt_base_topic, "/ECU/");
+    }
 
     #[test]
     fn test_default_config_validation() {
@@ -569,96 +721,169 @@ mod tests {
 
     #[test]
     fn test_invalid_baud_rate() {
-        let mut config = AppConfig::default();
-        config.baud_rate = 12345;
+        let config = AppConfig {
+            baud_rate: 12345,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_invalid_mqtt_qos() {
-        let mut config = AppConfig::default();
-        config.mqtt_qos = 5;
+        let config = AppConfig {
+            mqtt_qos: 5,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_invalid_refresh_rate() {
-        let mut config = AppConfig::default();
-        config.refresh_rate_ms = 0;
+        let config = AppConfig {
+            refresh_rate_ms: 0,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_missing_port_name() {
-        let mut config = AppConfig::default();
-        config.port_name = String::new();
+        let config = AppConfig {
+            port_name: String::new(),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_retry_delay_validation() {
-        let mut config = AppConfig::default();
-        config.max_retry_delay_ms = 500;
-        config.initial_retry_delay_ms = 1000;
+        let config = AppConfig {
+            max_retry_delay_ms: 500,
+            initial_retry_delay_ms: 1000,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_valid_log_levels() {
-        for level in &["trace", "debug", "info", "warn", "error"] {
-            let mut config = AppConfig::default();
-            config.log_level = level.to_string();
+        for level in ["trace", "debug", "info", "warn", "error"] {
+            let config = AppConfig {
+                log_level: level.to_string(),
+                ..Default::default()
+            };
             assert!(config.validate().is_ok());
         }
     }
 
     #[test]
     fn test_invalid_log_level() {
-        let mut config = AppConfig::default();
-        config.log_level = "verbose".to_string();
+        let config = AppConfig {
+            log_level: "verbose".to_string(),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_tcp_connection_type_requires_host() {
-        let mut config = AppConfig::default();
-        config.connection_type = "tcp".to_string();
-        config.tcp_host = None;
-        config.tcp_port = Some(4096);
+        let config = AppConfig {
+            connection_type: "tcp".to_string(),
+            tcp_host: None,
+            tcp_port: Some(4096),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_tcp_connection_type_requires_port() {
-        let mut config = AppConfig::default();
-        config.connection_type = "tcp".to_string();
-        config.tcp_host = Some("192.168.1.100".to_string());
-        config.tcp_port = None;
+        let config = AppConfig {
+            connection_type: "tcp".to_string(),
+            tcp_host: Some("192.168.1.100".to_string()),
+            tcp_port: None,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_tcp_connection_type_valid() {
-        let mut config = AppConfig::default();
-        config.connection_type = "tcp".to_string();
-        config.tcp_host = Some("192.168.1.100".to_string());
-        config.tcp_port = Some(4096);
+        let config = AppConfig {
+            connection_type: "tcp".to_string(),
+            tcp_host: Some("192.168.1.100".to_string()),
+            tcp_port: Some(4096),
+            ..Default::default()
+        };
         assert!(config.validate().is_ok());
     }
 
     #[test]
+    fn socketcan_connection_requires_an_interface() {
+        let mut config = AppConfig {
+            ecu_protocol: EcuProtocol::HaltechCanV2,
+            connection_type: "can".to_string(),
+            can_interface: None,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+        config.can_interface = Some("  ".to_string());
+        assert!(config.validate().is_err());
+        config.can_interface = Some("can0".to_string());
+        config.validate().unwrap();
+        assert_eq!(config.connection_display(), "CAN can0");
+    }
+
+    #[test]
+    fn socketcan_connection_rejects_a_serial_profile() {
+        let config = AppConfig {
+            ecu_protocol: EcuProtocol::Speeduino,
+            connection_type: "can".to_string(),
+            can_interface: Some("can0".to_string()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn can_profiles_reject_a_plain_serial_port() {
+        let config = AppConfig {
+            ecu_protocol: EcuProtocol::AemnetCan,
+            connection_type: "serial".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn can_profiles_still_accept_the_tcp_gateway() {
+        let config = AppConfig {
+            ecu_protocol: EcuProtocol::AemnetCan,
+            connection_type: "tcp".to_string(),
+            tcp_host: Some("127.0.0.1".to_string()),
+            tcp_port: Some(29536),
+            ..Default::default()
+        };
+        config.validate().unwrap();
+    }
+
+    #[test]
     fn test_invalid_connection_type() {
-        let mut config = AppConfig::default();
-        config.connection_type = "usb".to_string();
+        let config = AppConfig {
+            connection_type: "usb".to_string(),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_mqtt_disabled_skips_mqtt_validation() {
-        let mut config = AppConfig::default();
-        config.mqtt_enabled = false;
-        config.mqtt_host = String::new();
-        config.mqtt_port = 0;
+        let config = AppConfig {
+            mqtt_enabled: false,
+            mqtt_host: String::new(),
+            mqtt_port: 0,
+            ..Default::default()
+        };
         assert!(config.validate().is_ok());
     }
 
@@ -670,10 +895,12 @@ mod tests {
 
     #[test]
     fn test_connection_display_tcp() {
-        let mut config = AppConfig::default();
-        config.connection_type = "tcp".to_string();
-        config.tcp_host = Some("192.168.1.50".to_string());
-        config.tcp_port = Some(4096);
+        let config = AppConfig {
+            connection_type: "tcp".to_string(),
+            tcp_host: Some("192.168.1.50".to_string()),
+            tcp_port: Some(4096),
+            ..Default::default()
+        };
         let display = config.connection_display();
         assert!(display.contains("192.168.1.50"));
         assert!(display.contains("4096"));

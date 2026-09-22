@@ -1,0 +1,11 @@
+# MicroSquirt running compatible MS2/Extra firmware.
+# Third-party firmware forks are not covered by this layout.
+ecu_protocol = "microsquirt"
+connection_type = "serial"
+port_name = "/dev/ttyUSB0"
+baud_rate = 115200
+read_timeout_ms = 2000
+refresh_rate_ms = 50
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/g86/car-1/ecu/"

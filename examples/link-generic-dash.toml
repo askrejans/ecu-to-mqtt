@@ -1,0 +1,11 @@
+# Link / Vi-PEC "Generic Dash" stream. Set the CAN channel mode, bitrate and
+# ID in PCLink; the default here is decimal 1000.
+#   python3 scripts/can_gateway.py --interface socketcan --channel can0 --bitrate 1000000
+ecu_protocol = "link_generic_dash"
+connection_type = "tcp"
+tcp_host = "127.0.0.1"
+tcp_port = 29536
+can_base_id = 1000
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/g86/car-1/ecu/"

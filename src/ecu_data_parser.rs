@@ -361,8 +361,8 @@ fn parse_realtime_data(data: &[u8]) -> Result<SpeeduinoData> {
 
     // Bytes 42–73: 16 CAN input channels (2 bytes each, little-endian u16)
     let mut canin = [0u16; 16];
-    for i in 0..16 {
-        canin[i] = u16_le(42 + i * 2, 43 + i * 2);
+    for (channel, value) in canin.iter_mut().enumerate() {
+        *value = u16_le(42 + channel * 2, 43 + channel * 2);
     }
 
     // Optional fields — all present in 130-byte packets.
@@ -525,11 +525,11 @@ fn validate_data(d: &SpeeduinoData) {
         warn!("RPM out of range: {} (max {})", d.rpm, RPM_MAX);
     }
     let coolant_c = d.coolant_celsius();
-    if coolant_c < TEMP_MIN || coolant_c > TEMP_MAX {
+    if !(TEMP_MIN..=TEMP_MAX).contains(&coolant_c) {
         warn!("Coolant temp out of range: {}°C", coolant_c);
     }
     let iat_c = d.iat_celsius();
-    if iat_c < TEMP_MIN || iat_c > TEMP_MAX {
+    if !(TEMP_MIN..=TEMP_MAX).contains(&iat_c) {
         warn!("IAT out of range: {}°C", iat_c);
     }
     if d.map > MAP_MAX {
@@ -539,7 +539,7 @@ fn validate_data(d: &SpeeduinoData) {
         warn!("TPS out of range: {}% (max {})", d.tps, TPS_MAX);
     }
     let batt = d.battery_voltage();
-    if batt > 0.0 && (batt < BATTERY_MIN || batt > BATTERY_MAX) {
+    if batt > 0.0 && !(BATTERY_MIN..=BATTERY_MAX).contains(&batt) {
         warn!("Battery voltage out of range: {:.1} V", batt);
     }
 }
@@ -1079,8 +1079,10 @@ mod tests {
 
     #[test]
     fn test_params_rpm() {
-        let mut d = SpeeduinoData::default();
-        d.rpm = 3000;
+        let d = SpeeduinoData {
+            rpm: 3000,
+            ..Default::default()
+        };
         let params = get_params_to_publish(&d);
         let found = params.iter().find(|(k, _)| *k == "RPM").unwrap();
         assert_eq!(found.1, "3000");
@@ -1088,8 +1090,10 @@ mod tests {
 
     #[test]
     fn test_params_battery_format() {
-        let mut d = SpeeduinoData::default();
-        d.battery_10 = 142;
+        let d = SpeeduinoData {
+            battery_10: 142,
+            ..Default::default()
+        };
         let params = get_params_to_publish(&d);
         let found = params.iter().find(|(k, _)| *k == "BAT").unwrap();
         assert_eq!(found.1, "14.2");
@@ -1097,8 +1101,10 @@ mod tests {
 
     #[test]
     fn test_params_emap_present_when_some() {
-        let mut d = SpeeduinoData::default();
-        d.emap = Some(101);
+        let d = SpeeduinoData {
+            emap: Some(101),
+            ..Default::default()
+        };
         let params = get_params_to_publish(&d);
         let found = params.iter().find(|(k, _)| *k == "EMP");
         assert!(found.is_some());

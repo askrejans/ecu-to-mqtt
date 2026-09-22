@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - name: SocketCAN tests against a virtual bus
+        run: |
+          sudo modprobe vcan
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set up vcan0
+          cargo test -- --ignored
+
+  gateway:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: python3 -m unittest discover -s scripts -p 'test_can_gateway.py'
+
+  end-to-end:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Install build dependencies and MQTT broker
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config mosquitto mosquitto-clients
+      - run: cargo build
+      - name: Every profile through a real broker
+        run: python3 scripts/smoke_mqtt_bridge.py
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.4.1
+      - uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ecu-to-mqtt:ci
+      - name: Image runs and reports its profiles
+        run: docker run --rm --entrypoint ecu-to-mqtt ecu-to-mqtt:ci --help | grep -q haltech_can_v2

@@ -1,17 +1,15 @@
 //! Bounded CAN frame transport from a USB/CAN gateway over TCP JSON-lines.
 //! Each line is {"id":1512,"data":[...eight bytes...]}. No ECU writes occur.
 use crate::{
-    config::AppConfig,
-    ecu_protocol::{CanInputFrame, decode_can},
-    mqtt_handler::MqttMessage,
-    telemetry_frame,
+    can_input, config::AppConfig, ecu_protocol::CanInputFrame, mqtt_handler::MqttMessage,
+    tui::TuiState,
 };
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     net::TcpStream,
-    sync::mpsc,
+    sync::{RwLock, mpsc},
     time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
@@ -19,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 pub async fn run(
     config: Arc<AppConfig>,
     sender: Option<mpsc::Sender<MqttMessage>>,
+    tui_state: Arc<RwLock<TuiState>>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let host = config
@@ -28,9 +27,7 @@ pub async fn run(
     let port = config
         .tcp_port
         .ok_or_else(|| anyhow::anyhow!("CAN gateway requires tcp_port"))?;
-    let base = config
-        .can_base_id
-        .unwrap_or(config.ecu_protocol.default_can_base());
+    let base = can_input::base_id(&config);
     let mut retry = 1u64;
     loop {
         let connected = tokio::select! {
@@ -39,6 +36,11 @@ pub async fn run(
         };
         if let Ok(Ok(stream)) = connected {
             retry = 1;
+            {
+                let mut state = tui_state.write().await;
+                state.ecu_connected = true;
+                state.connection_address = config.connection_display();
+            }
             let mut reader = BufReader::new(stream);
             let mut line = Vec::with_capacity(256);
             loop {
@@ -67,35 +69,14 @@ pub async fn run(
                 }
                 match serde_json::from_slice::<CanInputFrame>(&line) {
                     Ok(frame) => {
-                        if let Some(captured) = frame.timestamp_ms {
-                            let now =
-                                SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-                            if now.abs_diff(captured) > 2000 {
-                                line.clear();
-                                continue;
-                            }
-                        }
-                        match decode_can(config.ecu_protocol, base, &frame) {
-                            Ok(channels) if !channels.is_empty() => {
-                                telemetry_frame::publish_at(
-                                    channels,
-                                    config.ecu_protocol.source(),
-                                    true,
-                                    &config,
-                                    sender.as_ref(),
-                                    frame.timestamp_ms,
-                                )
-                                .await?
-                            }
-                            Ok(_) => {}
-                            Err(error) => tracing::warn!(%error,"CAN frame rejected"),
-                        }
+                        can_input::accept(frame, base, &config, sender.as_ref(), &tui_state).await?
                     }
                     Err(error) => tracing::warn!(%error,"Invalid CAN gateway JSON"),
                 }
                 line.clear();
             }
         }
+        tui_state.write().await.ecu_connected = false;
         tracing::warn!(retry_seconds = retry, "CAN gateway disconnected");
         tokio::select! {_=cancel.cancelled()=>return Ok(()), _=sleep(Duration::from_secs(retry))=>{}}
         retry = (retry * 2).min(30);
@@ -122,12 +103,18 @@ mod tests {
         });
         let (sender, mut receiver) = mpsc::channel(4);
         let cancel = CancellationToken::new();
-        let task = tokio::spawn(run(config, Some(sender), cancel.clone()));
+        let tui_state = Arc::new(RwLock::new(TuiState {
+            protocol: EcuProtocol::HaltechCanV2,
+            ..Default::default()
+        }));
+        let task = tokio::spawn(run(
+            config,
+            Some(sender),
+            Arc::clone(&tui_state),
+            cancel.clone(),
+        ));
         let (mut stream, _) = listener.accept().await.unwrap();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = can_input::now_ms().unwrap();
         stream.write_all(b"{bad json}\n").await.unwrap();
         let stale =
             serde_json::json!({"id":864,"timestampMs":now-5000,"data":[23,112,3,245,2,238,0,0]})
@@ -151,6 +138,14 @@ mod tests {
         assert_eq!(payload["channels"]["rpm"], 6000.);
         assert_eq!(payload["partial"], true);
         assert!(receiver.try_recv().is_err());
+        // The terminal dashboard shows the same decoded packet, and only the
+        // channels that packet carried.
+        let state = tui_state.read().await;
+        assert!(state.ecu_connected);
+        assert_eq!(state.frames_decoded, 1);
+        assert_eq!(state.channels["rpm"].value, 6000.);
+        assert!(!state.channels.contains_key("coolantC"));
+        drop(state);
         cancel.cancel();
         timeout(Duration::from_secs(1), task)
             .await

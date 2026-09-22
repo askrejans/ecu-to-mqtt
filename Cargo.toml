@@ -1,46 +1,52 @@
 [package]
-name = "speeduino-to-mqtt"
-version = "0.4.0"
+name = "ecu-to-mqtt"
+version = "0.5.0"
 edition = "2024"
+
+[[bin]]
+name = "ecu-to-mqtt"
+path = "src/main.rs"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.50.0", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-tokio-serial = "5.4.4"
-futures-util = "0.3.32"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+tokio-serial = "5.5.0"
+futures-util = "0.3.34"
 
 # Configuration
-config = "0.15.19"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.149"
-dotenvy = "0.15"
+config = "0.15.26"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+dotenvy = "0.15.7"
 
 # MQTT
-paho-mqtt = "0.13.3"
-openssl = { version = "0.10.75", features = ["vendored"] }
+paho-mqtt = "0.14.0"
+openssl = { version = "0.10.81", features = ["vendored"] }
 
 # Error handling
-thiserror = "2.0.18"
-anyhow = "1.0.102"
+thiserror = "2.0.20"
+anyhow = "1.0.104"
 
 # Logging and tracing
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 
 # CLI
 gumdrop = "0.8.1"
-atty = "0.2.14"
 
 # TUI
-ratatui = "0.30.0"
+ratatui = "0.30.2"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
+
+# Native SocketCAN input (Linux only; other platforms use the CAN gateway)
+[target.'cfg(target_os = "linux")'.dependencies]
+socketcan = { version = "4.0.0", features = ["tokio"] }
 
 # Signal handling for graceful shutdown (Unix only; Windows uses tokio::signal)
 [target.'cfg(unix)'.dependencies]
-signal-hook = "0.4.3"
+signal-hook = "0.4.4"
 signal-hook-tokio = { version = "0.4.0", features = ["futures-v0_3"] }
 
 [dev-dependencies]
-tempdir = "0.3.7"
-tempfile = "3.26.0"
+tempfile = "3.27.0"

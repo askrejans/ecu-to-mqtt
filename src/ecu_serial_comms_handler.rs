@@ -310,9 +310,11 @@ mod tests {
 
     #[test]
     fn test_exponential_backoff_calculation() {
-        let mut config = AppConfig::default();
-        config.initial_retry_delay_ms = 1000;
-        config.max_retry_delay_ms = 60000;
+        let config = AppConfig {
+            initial_retry_delay_ms: 1000,
+            max_retry_delay_ms: 60000,
+            ..Default::default()
+        };
 
         let mut handler = EcuSerialHandler::new(config);
 

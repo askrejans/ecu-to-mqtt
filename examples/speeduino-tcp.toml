@@ -1,0 +1,12 @@
+# Speeduino over a WiFi/Ethernet serial bridge (ESP32, Moxa, USR-VIS410 …).
+# The bridge must forward the ECU's primary serial port transparently.
+ecu_protocol = "speeduino"
+connection_type = "tcp"
+tcp_host = "192.168.1.100"
+tcp_port = 23
+expected_data_length = 130
+read_timeout_ms = 2000
+refresh_rate_ms = 20
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/g86/car-1/ecu/"

@@ -48,7 +48,7 @@ impl MqttHandler {
         let client_id = config
             .mqtt_client_id
             .clone()
-            .unwrap_or_else(|| format!("speeduino-to-mqtt-{}", std::process::id()));
+            .unwrap_or_else(|| format!("ecu-to-mqtt-{}", std::process::id()));
 
         let server_uri = if config.mqtt_use_tls {
             format!("ssl://{}:{}", config.mqtt_host, config.mqtt_port)
@@ -99,7 +99,7 @@ impl MqttHandler {
             conn_opts_builder.user_name(username);
 
             if let Some(ref password) = self.config.mqtt_password {
-                conn_opts_builder.password(password);
+                conn_opts_builder.password(password.as_str());
             }
         }
 
@@ -232,10 +232,10 @@ impl MqttHandler {
                         }
 
                         // Retry publishing this message
-                        if self.is_connected {
-                            if let Err(e) = self.publish(&message).await {
-                                error!("Retry publish failed: {}", e);
-                            }
+                        if self.is_connected
+                            && let Err(e) = self.publish(&message).await
+                        {
+                            error!("Retry publish failed: {}", e);
                         }
                     } else {
                         error!("Max reconnection attempts exceeded, dropping message");
@@ -252,7 +252,7 @@ impl MqttHandler {
     fn calculate_backoff_delay(&self) -> u64 {
         let base_delay = self.config.initial_retry_delay_ms;
         let max_delay = self.config.max_retry_delay_ms;
-        let attempts = self.reconnection_attempts.saturating_sub(1) as u32;
+        let attempts = self.reconnection_attempts.saturating_sub(1);
 
         let delay = base_delay * 2_u64.pow(attempts);
         delay.min(max_delay)
@@ -322,9 +322,11 @@ mod tests {
 
     #[test]
     fn test_backoff_calculation() {
-        let mut config = AppConfig::default();
-        config.initial_retry_delay_ms = 1000;
-        config.max_retry_delay_ms = 60000;
+        let config = AppConfig {
+            initial_retry_delay_ms: 1000,
+            max_retry_delay_ms: 60000,
+            ..Default::default()
+        };
 
         let handler = MqttHandler::new(Arc::new(config)).unwrap();
 

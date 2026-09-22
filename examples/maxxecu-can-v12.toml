@@ -1,0 +1,10 @@
+# MaxxECU "default CAN protocol" 1.2, 11-bit IDs at 500 kbit/s, base 0x520.
+#   python3 scripts/can_gateway.py --interface socketcan --channel can0 --bitrate 500000
+ecu_protocol = "maxxecu_can_v12"
+connection_type = "tcp"
+tcp_host = "127.0.0.1"
+tcp_port = 29536
+can_base_id = 0x520
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/g86/car-1/ecu/"

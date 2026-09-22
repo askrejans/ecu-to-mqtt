@@ -1,6 +1,5 @@
-# MS2/Extra 3.3+, MS3 1.2+, MS3Pro or compatible MicroSquirt.
-# Change ecu_protocol to ms2, ms3_pro or microsquirt for those controllers.
-ecu_protocol = "ms3"
+# MS3Pro answering the MS3 compatibility command.
+ecu_protocol = "ms3_pro"
 connection_type = "serial"
 port_name = "/dev/ttyUSB0"
 baud_rate = 115200

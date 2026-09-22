@@ -1,0 +1,187 @@
+name: Release
+
+# Publishes a GitHub Release when a version tag is pushed:
+#   git tag 0.5.0 && git push origin 0.5.0
+# Nothing is published on ordinary pushes, and the tag must match the version
+# in Cargo.toml (a leading "v" is accepted).
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: version
+        name: Tag and Cargo.toml must agree
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "${tag#v}" != "$version" ]; then
+            echo "Tag $tag does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  archives:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,   target: x86_64-unknown-linux-gnu,  label: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, label: linux-aarch64 }
+          - { os: macos-14,        target: aarch64-apple-darwin,      label: macos-arm64 }
+          - { os: macos-13,        target: x86_64-apple-darwin,       label: macos-x86_64 }
+          - { os: windows-latest,  target: x86_64-pc-windows-msvc,    label: windows-x86_64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Stage archive
+        shell: bash
+        run: |
+          set -eu
+          version="${{ needs.verify.outputs.version }}"
+          stage="stage/ecu-to-mqtt_${version}_${{ matrix.label }}"
+          mkdir -p "$stage" dist
+          cp README.md ECU_PROTOCOLS.md LICENCE "$stage/"
+          cp example.settings.toml "$stage/settings.toml.example"
+          cp -r examples "$stage/examples"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/ecu-to-mqtt.exe" "$stage/"
+            (cd stage && 7z a -tzip "../dist/$(basename "$stage").zip" "$(basename "$stage")")
+          else
+            cp "target/${{ matrix.target }}/release/ecu-to-mqtt" "$stage/"
+            cp ecu-to-mqtt.service "$stage/"
+            tar -czf "dist/$(basename "$stage").tar.gz" -C stage "$(basename "$stage")"
+          fi
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: archive-${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+
+  packages:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    arch: x64 }
+          - { os: ubuntu-24.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config dpkg-dev rpm
+      - name: Build DEB and RPM
+        run: ./scripts/build_packages.sh --platform linux --arch ${{ matrix.arch }} --type all --no-cross
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: packages-${{ matrix.arch }}
+          path: release/${{ needs.verify.outputs.version }}/linux/**/*.*
+          if-no-files-found: error
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: docker/setup-buildx-action@v4.4.1
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ needs.verify.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+
+  publish:
+    needs: [verify, archives, packages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          path: downloads
+      - name: Collect artifacts and checksums
+        run: |
+          set -eu
+          mkdir -p dist
+          find downloads -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' \) \
+            -exec cp {} dist/ \;
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -eu
+          notes="$(mktemp)"
+          {
+            echo "## ecu-to-mqtt $VERSION"
+            echo
+            echo "Read-only ECU telemetry bridge: Speeduino, MegaSquirt and documented"
+            echo "Haltech, MaxxECU, ECUMaster, AEMnet, Link and MoTeC CAN streams to MQTT."
+            echo
+            echo "- Linux: \`.deb\` / \`.rpm\` (installs the \`ecu-to-mqtt\` systemd service)"
+            echo "- macOS / Windows: archive with the binary, example configs and docs"
+            echo "- Container: \`ghcr.io/${{ github.repository }}:$VERSION\`"
+            echo
+            echo "Verify downloads against \`SHA256SUMS\`."
+          } > "$notes"
+          gh release create "$TAG" dist/* \
+            --title "ecu-to-mqtt $VERSION" \
+            --notes-file "$notes" \
+            --verify-tag

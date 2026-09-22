@@ -1,4 +1,4 @@
-//! Error types for the Speeduino-to-MQTT application
+//! Error types for the ECU-to-MQTT application
 //!
 //! This module defines custom error types for different subsystems
 //! using the thiserror crate for ergonomic error handling.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# build_packages.sh – Cross-compile speeduino-to-mqtt for all platforms
+# build_packages.sh – Cross-compile ecu-to-mqtt for all platforms
 #
 # Usage:
 #   ./scripts/build_packages.sh [options]
@@ -78,13 +78,13 @@ require_cmd() {
 # ---------------------------------------------------------------------------
 # Package metadata
 # ---------------------------------------------------------------------------
-PKG_NAME="speeduino-to-mqtt"
+PKG_NAME="ecu-to-mqtt"
 PKG_VERSION="$(grep '^version' "$PROJECT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
-PKG_DESCRIPTION="Speeduino ECU to MQTT bridge service"
+PKG_DESCRIPTION="ECU to MQTT bridge service (Speeduino, MegaSquirt, CAN profiles)"
 PKG_MAINTAINER="askrejans <arvis.skrejans@gmail.com>"
 PKG_LICENSE="MIT"
-PKG_URL="https://github.com/askrejans/speeduino-to-mqtt"
-SERVICE_FILE="$PROJECT_DIR/speeduino-to-mqtt.service"
+PKG_URL="https://github.com/askrejans/ecu-to-mqtt"
+SERVICE_FILE="$PROJECT_DIR/ecu-to-mqtt.service"
 
 log "Package: $PKG_NAME v$PKG_VERSION"
 
@@ -270,37 +270,38 @@ Version: $PKG_VERSION
 Architecture: $deb_arch
 Maintainer: $PKG_MAINTAINER
 Description: $PKG_DESCRIPTION
- Bridges a Speeduino ECU (serial or TCP/IP) to an MQTT broker.
- Runs as a systemd service in production or as an interactive TUI.
+ Bridges an engine controller (Speeduino, MegaSquirt or a documented
+ manufacturer CAN stream) to an MQTT broker over serial, TCP/IP or a CAN
+ gateway. Runs as a systemd service in production or as an interactive TUI.
 Section: misc
 Priority: optional
 Homepage: $PKG_URL
 EOF
 
-    cat > "$debian_dir/postinst" <<'POSTINST'
+    cat > "$debian_dir/postinst" <<POSTINST
 #!/bin/bash
 set -e
 # Create service user in dialout/tty groups for serial access
-if ! id speeduino &>/dev/null; then
-    useradd --system --no-create-home --shell /usr/sbin/nologin \
-            --groups dialout,tty speeduino 2>/dev/null || true
+if ! id $PKG_NAME &>/dev/null; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin \\
+            --groups dialout,tty $PKG_NAME 2>/dev/null || true
 fi
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
-    systemctl enable speeduino-to-mqtt.service || true
-    echo "Service installed. Edit /etc/speeduino-to-mqtt/settings.toml, then:"
-    echo "  sudo systemctl start speeduino-to-mqtt"
+    systemctl enable ${PKG_NAME}.service || true
+    echo "Service installed. Edit /etc/$PKG_NAME/settings.toml, then:"
+    echo "  sudo systemctl start $PKG_NAME"
 fi
 exit 0
 POSTINST
     chmod 755 "$debian_dir/postinst"
 
-    cat > "$debian_dir/prerm" <<'PRERM'
+    cat > "$debian_dir/prerm" <<PRERM
 #!/bin/bash
 set -e
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl stop    speeduino-to-mqtt.service 2>/dev/null || true
-    systemctl disable speeduino-to-mqtt.service 2>/dev/null || true
+    systemctl stop    ${PKG_NAME}.service 2>/dev/null || true
+    systemctl disable ${PKG_NAME}.service 2>/dev/null || true
 fi
 exit 0
 PRERM
@@ -356,8 +357,9 @@ BuildArch:      $rpm_arch
 %{!?systemd_postun_with_restart:     %define systemd_postun_with_restart(p)     :}
 
 %description
-Bridges a Speeduino ECU (serial or TCP/IP) to an MQTT broker.
-Runs as a systemd service in production or as an interactive TUI.
+Bridges an engine controller (Speeduino, MegaSquirt or a documented
+manufacturer CAN stream) to an MQTT broker over serial, TCP/IP or a CAN
+gateway. Runs as a systemd service in production or as an interactive TUI.
 
 %prep
 
@@ -375,9 +377,9 @@ install -m644 %{_sourcedir}/settings.toml.example \
 %pre
 getent group  dialout  >/dev/null || groupadd -r dialout  || true
 getent group  tty      >/dev/null || groupadd -r tty      || true
-getent passwd speeduino >/dev/null || \
+getent passwd $PKG_NAME >/dev/null || \
     useradd --system --no-create-home --shell /sbin/nologin \
-            -G dialout,tty speeduino || true
+            -G dialout,tty $PKG_NAME || true
 
 %files
 %{_bindir}/$PKG_NAME
@@ -477,16 +479,18 @@ build_win_zip() {
     [[ -f "$PROJECT_DIR/example.settings.toml" ]] && \
         cp "$PROJECT_DIR/example.settings.toml" "$stage_dir/settings.toml.example"
     cat > "$stage_dir/README.txt" <<EOF
-speeduino-to-mqtt v$PKG_VERSION – Windows
+$PKG_NAME v$PKG_VERSION – Windows
 
 Usage:
-  speeduino-to-mqtt.exe --config settings.toml
+  $PKG_NAME.exe --config settings.toml
 
 1. Copy settings.toml.example to settings.toml and edit it.
-2. Run the .exe in a terminal or install as a Windows Service with NSSM:
-     nssm install speeduino-to-mqtt "C:\path\to\speeduino-to-mqtt.exe"
-     nssm set    speeduino-to-mqtt AppParameters "--config C:\path\to\settings.toml"
-     nssm start  speeduino-to-mqtt
+2. Pick the ECU profile with ecu_protocol (see ECU_PROTOCOLS.md); the
+   examples\\ directory in the repository has one config per profile.
+3. Run the .exe in a terminal or install as a Windows Service with NSSM:
+     nssm install $PKG_NAME "C:\\path\\to\\$PKG_NAME.exe"
+     nssm set    $PKG_NAME AppParameters "--config C:\\path\\to\\settings.toml"
+     nssm start  $PKG_NAME
 
 Project: $PKG_URL
 EOF

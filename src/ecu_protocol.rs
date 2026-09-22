@@ -25,6 +25,67 @@ pub enum EcuProtocol {
     MotecM1Pdm,
 }
 impl EcuProtocol {
+    /// Every supported profile, in documentation order.
+    pub const ALL: [EcuProtocol; 15] = [
+        Self::Speeduino,
+        Self::Ms2,
+        Self::Ms3,
+        Self::Ms3Pro,
+        Self::Microsquirt,
+        Self::MegasquirtCanDash,
+        Self::MegasquirtCanRealtime,
+        Self::HaltechCanV2,
+        Self::MaxxecuCanV12,
+        Self::MaxxecuCanV13,
+        Self::EcumasterEmuCan,
+        Self::AemnetCan,
+        Self::LinkGenericDash,
+        Self::LinkGenericDash2,
+        Self::MotecM1Pdm,
+    ];
+
+    /// The `ecu_protocol` configuration value for this profile.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Speeduino => "speeduino",
+            Self::Ms2 => "ms2",
+            Self::Ms3 => "ms3",
+            Self::Ms3Pro => "ms3_pro",
+            Self::Microsquirt => "microsquirt",
+            Self::MegasquirtCanDash => "megasquirt_can_dash",
+            Self::MegasquirtCanRealtime => "megasquirt_can_realtime",
+            Self::HaltechCanV2 => "haltech_can_v2",
+            Self::MaxxecuCanV12 => "maxxecu_can_v12",
+            Self::MaxxecuCanV13 => "maxxecu_can_v13",
+            Self::EcumasterEmuCan => "ecumaster_emu_can",
+            Self::AemnetCan => "aemnet_can",
+            Self::LinkGenericDash => "link_generic_dash",
+            Self::LinkGenericDash2 => "link_generic_dash2",
+            Self::MotecM1Pdm => "motec_m1_pdm",
+        }
+    }
+
+    /// Manufacturer-facing description used in the terminal dashboard header.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Speeduino => "Speeduino primary 'A'",
+            Self::Ms2 => "MegaSquirt MS2/Extra",
+            Self::Ms3 => "MegaSquirt MS3",
+            Self::Ms3Pro => "MegaSquirt MS3Pro",
+            Self::Microsquirt => "MicroSquirt",
+            Self::MegasquirtCanDash => "MegaSquirt CAN dash",
+            Self::MegasquirtCanRealtime => "MegaSquirt CAN realtime",
+            Self::HaltechCanV2 => "Haltech CAN V2",
+            Self::MaxxecuCanV12 => "MaxxECU CAN 1.2",
+            Self::MaxxecuCanV13 => "MaxxECU CAN 1.3",
+            Self::EcumasterEmuCan => "ECUMaster EMU CAN",
+            Self::AemnetCan => "AEMnet v150609",
+            Self::LinkGenericDash => "Link Generic Dash",
+            Self::LinkGenericDash2 => "Link Generic Dash 2",
+            Self::MotecM1Pdm => "MoTeC M1 PDM GPx 1.4",
+        }
+    }
+
     pub fn is_can(self) -> bool {
         !matches!(
             self,
@@ -219,6 +280,18 @@ pub fn decode_can(protocol: EcuProtocol, base: u32, frame: &CanInputFrame) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profile_names_match_the_accepted_configuration_values() {
+        for protocol in EcuProtocol::ALL {
+            let value = serde_json::to_string(&protocol).unwrap();
+            assert_eq!(value, format!("\"{}\"", protocol.name()));
+            assert_eq!(
+                serde_json::from_str::<EcuProtocol>(&value).unwrap(),
+                protocol
+            );
+            assert!(!protocol.label().is_empty());
+        }
+    }
     #[test]
     fn all_serial_profiles_use_only_the_documented_read_command() {
         for protocol in [
