@@ -1,6 +1,15 @@
 # Speeduino-to-MQTT
 
-A Rust application that reads real-time engine data from a [Speeduino](https://speeduino.com) ECU and publishes it to an MQTT broker. Supports hardware serial ports and TCP/IP bridges (WiFi, Ethernet), an interactive terminal UI for standalone/bench use, and fully optional MQTT so the app can run display-only without any broker.
+A Rust application that reads real-time engine data from Speeduino, MegaSquirt and documented Haltech, Link, MaxxECU, ECUMaster, AEMnet and MoTeC CAN streams and publishes it to an MQTT broker. Supports hardware serial ports, TCP/IP serial bridges and a CAN adapter gateway. The interactive terminal dashboard remains available for Speeduino.
+
+**Local version 0.4.0:** see [ECU protocols and setup](ECU_PROTOCOLS.md) for exact
+controller/firmware boundaries, supported channels, CAN adapter instructions and
+example configurations. These additions have automated protocol tests; physical
+ECU validation remains outstanding. Existing installation instructions below do
+not imply that 0.4.0 has been published.
+
+The project name is unchanged. [RENAME_PLAN.md](RENAME_PLAN.md) describes a future
+rename and compatibility migration; the rename has not been executed.
 
 ![speeduino-to-mqtt](https://github.com/user-attachments/assets/769b1ad8-092c-4101-8461-65cdcd04bb9b)
 

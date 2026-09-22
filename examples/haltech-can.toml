@@ -1,0 +1,11 @@
+# Read-only Haltech V2 CAN via scripts/can_gateway.py at 1 Mbit/s.
+# See ECU_PROTOCOLS.md for other profiles and adapter configuration.
+ecu_protocol = "haltech_can_v2"
+connection_type = "tcp"
+tcp_host = "127.0.0.1"
+tcp_port = 29536
+can_base_id = 0x360
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/g86/car-1/ecu/"
+mqtt_qos = 0

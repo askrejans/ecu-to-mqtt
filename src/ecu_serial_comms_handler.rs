@@ -12,9 +12,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
-/// ECU command to request realtime data
-const ECU_COMMAND: u8 = b'A';
-
 /// Time to wait after sending the command before draining the buffer.
 /// At 115200 baud, 138 bytes take ~12 ms to transmit.  150 ms gives
 /// comfortable headroom for any Speeduino firmware version so the entire
@@ -71,11 +68,9 @@ impl EcuSerialHandler {
 
     /// Read engine data from the ECU
     ///
-    /// Flushes the hardware buffer, sends 'A', then sleeps long enough for the
-    /// ECU to finish transmitting before draining whatever arrived.  Because we
-    /// wait before reading, all bytes are already in the OS buffer — each
-    /// non-blocking drain read completes instantly.  No `read_exact` means no
-    /// hang regardless of firmware packet size (130, 138, or anything else).
+    /// Speeduino retains its variable-length response. MegaSquirt's fixed
+    /// compatibility response is read to completion under one bounded deadline,
+    /// including when a serial-to-TCP adapter fragments it between packets.
     pub async fn read_engine_data(&mut self) -> Result<Vec<u8>> {
         let conn = self.connection.as_mut().ok_or(SerialError::Disconnected)?;
 
@@ -83,11 +78,36 @@ impl EcuSerialHandler {
         conn.clear_buffers().ok();
 
         // ── Send command ──────────────────────────────────────────────────────
-        debug!("Sending ECU command: 0x{:02X}", ECU_COMMAND);
-        conn.write_all(&[ECU_COMMAND])
+        let command = self.config.ecu_protocol.command();
+        debug!("Sending telemetry read command: {:?}", command);
+        conn.write_all(command)
             .await
             .map_err(SerialError::WriteFailed)?;
         conn.flush().await.map_err(SerialError::WriteFailed)?;
+
+        if self.config.ecu_protocol != crate::ecu_protocol::EcuProtocol::Speeduino {
+            let mut buffer = vec![0; 112];
+            let result = timeout(
+                Duration::from_millis(self.config.read_timeout_ms),
+                conn.read_exact(&mut buffer),
+            )
+            .await;
+            match result {
+                Ok(Ok(_)) => return Ok(buffer),
+                Ok(Err(error)) => {
+                    // A partial packet cannot become the next response.
+                    self.connection = None;
+                    return Err(SerialError::ReadFailed(error).into());
+                }
+                Err(_) => {
+                    self.connection = None;
+                    return Err(SerialError::ReadTimeout {
+                        timeout_ms: self.config.read_timeout_ms,
+                    }
+                    .into());
+                }
+            }
+        }
 
         // ── Wait for ECU to finish transmitting ───────────────────────────────
         sleep(Duration::from_millis(COMMAND_PROCESSING_DELAY_MS)).await;
@@ -102,7 +122,11 @@ impl EcuSerialHandler {
         let first_deadline = Duration::from_millis(self.config.read_timeout_ms);
         let mut first_read = true;
         loop {
-            let per_read_timeout = if first_read { first_deadline } else { Duration::from_millis(5) };
+            let per_read_timeout = if first_read {
+                first_deadline
+            } else {
+                Duration::from_millis(5)
+            };
             let mut tmp = [0u8; 64];
             match timeout(per_read_timeout, conn.read(&mut tmp)).await {
                 Ok(Ok(0)) => break,
@@ -224,6 +248,32 @@ impl Drop for EcuSerialHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn partial_megasquirt_response_times_out_and_discards_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut handler = EcuSerialHandler::new(AppConfig {
+            ecu_protocol: crate::ecu_protocol::EcuProtocol::Ms3,
+            connection_type: "tcp".into(),
+            tcp_host: Some("127.0.0.1".into()),
+            tcp_port: Some(listener.local_addr().unwrap().port()),
+            read_timeout_ms: 40,
+            ..Default::default()
+        });
+        handler.connect().await.unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let read = tokio::spawn(async move {
+            assert!(handler.read_engine_data().await.is_err());
+            assert!(!handler.is_connected());
+        });
+        let mut command = [0; 3];
+        stream.read_exact(&mut command).await.unwrap();
+        stream.write_all(&[0; 37]).await.unwrap();
+        timeout(Duration::from_secs(1), read)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn test_ecu_serial_handler_creation() {

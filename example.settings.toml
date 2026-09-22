@@ -47,7 +47,15 @@ baud_rate = 115200
 # ECU Protocol
 # ========================================
 
-# Expected data packet length from ECU in bytes.
+# Profile: speeduino, ms2, ms3, ms3_pro, microsquirt, or a CAN profile.
+# See ECU_PROTOCOLS.md for exact compatibility and CAN gateway setup.
+# Env var: SPEEDUINO_ECU_PROTOCOL
+ecu_protocol = "speeduino"
+
+# Optional CAN base override, only for a CAN profile. TOML accepts hex.
+# can_base_id = 0x360
+
+# Speeduino-only expected data packet length in bytes.
 # Valid range: 119–256.  120 = standard packet, 121 = with EMAP sensor.
 # expected_data_length = 120
 

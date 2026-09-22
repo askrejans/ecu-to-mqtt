@@ -20,7 +20,11 @@
 use crate::config::AppConfig;
 use crate::errors::{ParseError, Result};
 use crate::mqtt_handler::{MqttMessage, build_topic_path};
-use std::sync::Arc;
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -89,7 +93,7 @@ pub struct SpeeduinoData {
     /// Bytes 22–23 – TPS rate of change (% × 10 per 100 ms, little-endian u16)
     pub tps_dot: u16,
     /// Byte 24 – ignition advance (degrees BTDC)
-    pub advance: u8,
+    pub advance: i8,
     /// Byte 25 – throttle position (0–100 %)
     pub tps: u8,
 
@@ -199,9 +203,9 @@ pub struct SpeeduinoData {
     /// Byte 117 – fuel temperature correction (%)
     pub fuel_temp_correction: u8,
     /// Byte 118 – advance table 1 (degrees)
-    pub advance1: u8,
+    pub advance1: i8,
     /// Byte 119 – advance table 2 (degrees)
-    pub advance2: u8,
+    pub advance2: i8,
     /// Byte 120 – TunerStudio SD card status
     pub ts_sd_status: u8,
 
@@ -443,7 +447,7 @@ fn parse_realtime_data(data: &[u8]) -> Result<SpeeduinoData> {
         afr_target: data[21],
         // ---- Bytes 22–41 — NOTE: tpsDOT is u16 (two bytes) ----
         tps_dot: u16_le(22, 23),
-        advance: data[24],
+        advance: data[24] as i8,
         tps: data[25],
         loops_per_second: u16_le(26, 27),
         free_ram: u16_le(28, 29),
@@ -494,8 +498,8 @@ fn parse_realtime_data(data: &[u8]) -> Result<SpeeduinoData> {
         outputs_status: data[115],
         fuel_temp_raw: data[116],
         fuel_temp_correction: data[117],
-        advance1: data[118],
-        advance2: data[119],
+        advance1: data[118] as i8,
+        advance2: data[119] as i8,
         ts_sd_status: data[120],
         // ---- Optional / extended fields -----------------------
         emap,
@@ -697,21 +701,75 @@ pub fn get_params_to_publish(d: &SpeeduinoData) -> Vec<(&'static str, String)> {
     params
 }
 
+/// One atomic sample with normalized units. Receivers can reject replayed,
+/// buffered or out-of-order frames instead of joining unrelated scalar topics.
+fn telemetry_frame(d: &SpeeduinoData, timestamp_ms: u64, boot_id: &str, sequence: u64) -> String {
+    let mut channels = serde_json::json!({
+        "rpm": d.rpm, "throttle": d.tps, "manifoldKpa": d.map,
+        "batteryV": d.battery_voltage(), "coolantC": d.coolant_celsius(),
+        "intakeC": d.iat_celsius(), "ignitionDeg": d.advance,
+    });
+    // An absent/unconfigured wideband reports zero, not a measured AFR of zero.
+    if (50..=250).contains(&d.o2_primary) {
+        channels["afr"] = serde_json::json!(d.o2_primary as f32 / 10.0);
+    }
+    serde_json::json!({
+        "schema": 1, "source": "speeduino-primary-a",
+        "timestampMs": timestamp_ms, "bootId": boot_id, "sequence": sequence,
+        "channels": channels,
+    })
+    .to_string()
+}
+
 async fn publish_speeduino_params_to_mqtt(
     mqtt_sender: &mpsc::Sender<MqttMessage>,
     config: &Arc<AppConfig>,
     d: &SpeeduinoData,
 ) -> Result<()> {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    static BOOT_ID: OnceLock<String> = OnceLock::new();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| ParseError::InvalidData {
+            offset: 0,
+            message: format!("System clock precedes Unix epoch: {error}"),
+        })?;
+    let boot = BOOT_ID.get_or_init(|| format!("{}-{}", std::process::id(), now.as_nanos()));
+    let snapshot = telemetry_frame(
+        d,
+        now.as_millis() as u64,
+        boot,
+        SEQUENCE.fetch_add(1, Ordering::Relaxed),
+    );
+    match mqtt_sender.try_send(MqttMessage::new(
+        build_topic_path(&config.mqtt_base_topic, "telemetry"),
+        snapshot,
+        config.mqtt_qos,
+    )) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => return Ok(()),
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return Err(ParseError::InvalidData {
+                offset: 0,
+                message: "MQTT frame queue closed".to_string(),
+            }
+            .into());
+        }
+    }
     for (code, value) in get_params_to_publish(d) {
         let topic = build_topic_path(&config.mqtt_base_topic, code);
         let msg = MqttMessage::new(topic, value, config.mqtt_qos);
-        mqtt_sender
-            .send(msg)
-            .await
-            .map_err(|_| ParseError::InvalidData {
-                offset: 0,
-                message: "Failed to queue MQTT message (channel closed)".to_string(),
-            })?;
+        match mqtt_sender.try_send(msg) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => break,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err(ParseError::InvalidData {
+                    offset: 0,
+                    message: "Failed to queue MQTT message (channel closed)".to_string(),
+                }
+                .into());
+            }
+        }
     }
     Ok(())
 }
@@ -723,6 +781,38 @@ async fn publish_speeduino_params_to_mqtt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_frame_has_normalized_units_and_no_invented_brake_or_gear() {
+        let mut packet = [0u8; 130];
+        packet[6] = 65;
+        packet[7] = 130;
+        packet[9] = 138;
+        packet[10] = 147;
+        packet[14] = 0x70;
+        packet[15] = 0x17;
+        packet[25] = 72;
+        packet[24] = (-12i8) as u8;
+        packet[118] = (-8i8) as u8;
+        packet[119] = (-6i8) as u8;
+        let data = parse_realtime_data(&packet).unwrap();
+        let frame: serde_json::Value =
+            serde_json::from_str(&telemetry_frame(&data, 1234, "boot", 7)).unwrap();
+        assert_eq!(frame["timestampMs"], 1234);
+        assert_eq!(frame["sequence"], 7);
+        assert_eq!(frame["channels"]["rpm"], 6000);
+        assert_eq!(frame["channels"]["ignitionDeg"], -12);
+        let legacy = get_params_to_publish(&data);
+        assert!(legacy.contains(&("ADV", "-12".into())));
+        assert!(legacy.contains(&("AD1", "-8".into())));
+        assert!(legacy.contains(&("AD2", "-6".into())));
+        assert_eq!(frame["channels"]["coolantC"], 90);
+        assert_eq!(frame["channels"]["intakeC"], 25);
+        assert!((frame["channels"]["batteryV"].as_f64().unwrap() - 13.8).abs() < 0.001);
+        assert!((frame["channels"]["afr"].as_f64().unwrap() - 14.7).abs() < 0.001);
+        assert!(frame["channels"].get("brake").is_none());
+        assert!(frame["channels"].get("gear").is_none());
+    }
 
     fn zero_packet() -> [u8; 130] {
         [0u8; 130]

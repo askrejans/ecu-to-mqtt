@@ -1,0 +1,11 @@
+# MS2/Extra 3.3+, MS3 1.2+, MS3Pro or compatible MicroSquirt.
+# Change ecu_protocol to ms2, ms3_pro or microsquirt for those controllers.
+ecu_protocol = "ms3"
+connection_type = "serial"
+port_name = "/dev/ttyUSB0"
+baud_rate = 115200
+read_timeout_ms = 2000
+refresh_rate_ms = 50
+mqtt_host = "localhost"
+mqtt_port = 1883
+mqtt_base_topic = "/g86/car-1/ecu/"

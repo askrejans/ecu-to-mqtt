@@ -15,6 +15,12 @@ const VALID_BAUD_RATES: &[u32] = &[9600, 19200, 38400, 57600, 115200, 230400, 46
 /// Main application configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// Read-only ECU protocol. See ECU_PROTOCOLS.md.
+    #[serde(default)]
+    pub ecu_protocol: crate::ecu_protocol::EcuProtocol,
+    /// Override the profile CAN base identifier; frame format is profile-specific.
+    #[serde(default)]
+    pub can_base_id: Option<u32>,
     // --- Connection type ---
     /// Connection type: "serial" (hardware UART) or "tcp" (raw TCP socket / WiFi bridge)
     #[serde(default = "default_connection_type")]
@@ -177,6 +183,8 @@ fn default_log_level() -> String {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            ecu_protocol: crate::ecu_protocol::EcuProtocol::default(),
+            can_base_id: None,
             connection_type: default_connection_type(),
             tcp_host: None,
             tcp_port: None,
@@ -212,6 +220,29 @@ impl AppConfig {
     /// Validate all configuration values against acceptable ranges and constraints.
     pub fn validate(&self) -> Result<()> {
         debug!("Validating configuration");
+        if self.ecu_protocol.is_can()
+            && (self.connection_type != "tcp" || self.tcp_host.is_none() || self.tcp_port.is_none())
+        {
+            return Err(ConfigError::ValidationFailed(
+                "CAN profiles require a TCP CAN gateway (tcp_host/tcp_port)".into(),
+            )
+            .into());
+        }
+        if self.can_base_id.is_some_and(|id| {
+            id.checked_add(self.ecu_protocol.last_can_offset())
+                .is_none_or(|last| {
+                    last > if self.ecu_protocol.extended() {
+                        0x1fffffff
+                    } else {
+                        0x7ff
+                    }
+                })
+        }) {
+            return Err(ConfigError::ValidationFailed(
+                "CAN base identifier leaves no room for broadcast groups".into(),
+            )
+            .into());
+        }
 
         match self.connection_type.to_lowercase().as_str() {
             "serial" => {
@@ -254,7 +285,9 @@ impl AppConfig {
             }
         }
 
-        if self.expected_data_length < 119 || self.expected_data_length > 256 {
+        if self.ecu_protocol == crate::ecu_protocol::EcuProtocol::Speeduino
+            && (self.expected_data_length < 119 || self.expected_data_length > 256)
+        {
             return Err(ConfigError::InvalidValue {
                 field: "expected_data_length".to_string(),
                 message: "must be between 119 and 256".to_string(),
@@ -464,10 +497,7 @@ pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig> {
     // No separator: SPEEDUINO_MQTT_ENABLED → "mqtt_enabled" (flat key).
     // With separator("_") the crate converts underscores to dots producing
     // nested keys like "mqtt.enabled" which don't match the flat struct fields.
-    builder = builder.add_source(
-        Environment::with_prefix("SPEEDUINO")
-            .try_parsing(true),
-    );
+    builder = builder.add_source(Environment::with_prefix("SPEEDUINO").try_parsing(true));
 
     let settings = builder
         .build()
@@ -491,6 +521,23 @@ pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shipped_ecu_examples_are_valid() {
+        for content in [
+            include_str!("../examples/haltech-can.toml"),
+            include_str!("../examples/megasquirt-serial.toml"),
+            include_str!("../examples/aemnet-can.toml"),
+        ] {
+            let config: AppConfig = Config::builder()
+                .add_source(File::from_str(content, config::FileFormat::Toml))
+                .build()
+                .unwrap()
+                .try_deserialize()
+                .unwrap();
+            config.validate().unwrap();
+        }
+    }
     use std::fs;
     use tempfile::tempdir;
 

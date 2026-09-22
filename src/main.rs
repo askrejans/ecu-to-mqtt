@@ -8,12 +8,16 @@
 //! **Service mode** (no TTY / running under systemd): structured logging to
 //! stdout, same ECU polling logic.
 
+mod can_profiles;
+mod can_stream;
 mod config;
 mod connection;
 mod ecu_data_parser;
+mod ecu_protocol;
 mod ecu_serial_comms_handler;
 mod errors;
 mod mqtt_handler;
+mod telemetry_frame;
 mod tui;
 
 use crate::config::{AppConfig, load_configuration};
@@ -52,6 +56,8 @@ fn print_help() {
     println!("  -c, --config FILE        Path to TOML config file");
     println!();
     println!("Environment variables (SPEEDUINO_ prefix overrides config file):");
+    println!("  SPEEDUINO_ECU_PROTOCOL     ECU profile name (see ECU_PROTOCOLS.md)");
+    println!("  SPEEDUINO_CAN_BASE_ID      CAN identifier override (decimal)");
     println!("  SPEEDUINO_CONNECTION_TYPE  'serial' (default) or 'tcp'");
     println!("  SPEEDUINO_PORT_NAME        Serial device path");
     println!("  SPEEDUINO_BAUD_RATE        Serial baud rate");
@@ -146,6 +152,9 @@ async fn ecu_communication_loop(
     tui_state: Arc<RwLock<TuiState>>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    if config.ecu_protocol.is_can() {
+        return can_stream::run(config, mqtt_sender, cancel).await;
+    }
     let mut handler = EcuSerialHandler::new((*config).clone());
 
     // Initial connection with backoff – retries indefinitely, never exits.
@@ -206,7 +215,9 @@ async fn ecu_communication_loop(
             } else {
                 consecutive_errors += 1;
                 if consecutive_errors >= MAX_ERRORS {
-                    warn!("Reconnection failed too many times – resetting counter and retrying indefinitely");
+                    warn!(
+                        "Reconnection failed too many times – resetting counter and retrying indefinitely"
+                    );
                     handler.reset_retry_count();
                     consecutive_errors = 0;
                 }
@@ -218,6 +229,27 @@ async fn ecu_communication_loop(
             Ok(data) => {
                 debug!("Read {} bytes from ECU", data.len());
                 let sender_ref = mqtt_sender.as_ref();
+                if config.ecu_protocol != ecu_protocol::EcuProtocol::Speeduino {
+                    match ecu_protocol::decode_compat112(&data) {
+                        Ok(channels) => {
+                            telemetry_frame::publish(
+                                channels,
+                                config.ecu_protocol.source(),
+                                false,
+                                &config,
+                                sender_ref,
+                            )
+                            .await?;
+                            consecutive_errors = 0;
+                            handler.reset_retry_count();
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "MegaSquirt data rejected");
+                            consecutive_errors += 1;
+                        }
+                    }
+                    continue;
+                }
                 match process_speeduino_realtime_data(&data, &config, sender_ref).await {
                     Ok(ecu_data) => {
                         consecutive_errors = 0;
@@ -244,7 +276,10 @@ async fn ecu_communication_loop(
                             tui_state.write().await.ecu_connected = true;
                         }
                         Err(e) => {
-                            warn!("Reconnect failed after read errors: {} – resetting and retrying indefinitely", e);
+                            warn!(
+                                "Reconnect failed after read errors: {} – resetting and retrying indefinitely",
+                                e
+                            );
                             handler.reset_retry_count();
                             consecutive_errors = 0;
                             tui_state.write().await.ecu_connected = false;
@@ -318,8 +353,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Detect whether stdin is a TTY – show TUI when running interactively.
     // SPEEDUINO_NO_TUI=1 forces service/log mode (set by default in Docker).
-    let force_no_tui = std::env::var("SPEEDUINO_NO_TUI").map(|v| v == "1").unwrap_or(false);
-    let is_tty = !force_no_tui && atty::is(atty::Stream::Stdout);
+    let force_no_tui = std::env::var("SPEEDUINO_NO_TUI")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let is_tty = !force_no_tui
+        && config.ecu_protocol == ecu_protocol::EcuProtocol::Speeduino
+        && atty::is(atty::Stream::Stdout);
 
     // Shared state for TUI
     let log_buffer: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
@@ -455,6 +494,68 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn megasquirt_profiles_read_tcp_reply_and_publish_canonical_mqtt() {
+        use ecu_protocol::EcuProtocol;
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            time::timeout,
+        };
+        for profile in [
+            EcuProtocol::Ms2,
+            EcuProtocol::Ms3,
+            EcuProtocol::Ms3Pro,
+            EcuProtocol::Microsquirt,
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let config = Arc::new(AppConfig {
+                ecu_protocol: profile,
+                connection_type: "tcp".into(),
+                tcp_host: Some("127.0.0.1".into()),
+                tcp_port: Some(listener.local_addr().unwrap().port()),
+                refresh_rate_ms: 1000,
+                ..Default::default()
+            });
+            let cancel = CancellationToken::new();
+            let (sender, mut receiver) = mpsc::channel(4);
+            let worker = tokio::spawn(ecu_communication_loop(
+                config,
+                Some(sender),
+                Arc::new(RwLock::new(TuiState::default())),
+                cancel.clone(),
+            ));
+            let (mut ecu, _) = listener.accept().await.unwrap();
+            let mut command = [0; 3];
+            ecu.read_exact(&mut command).await.unwrap();
+            assert_eq!(command, [b'a', 0, 6]);
+            let mut reply = [0u8; 112];
+            reply[6..8].copy_from_slice(&6000u16.to_be_bytes());
+            reply[22..24].copy_from_slice(&1940u16.to_be_bytes());
+            reply[26..28].copy_from_slice(&138u16.to_be_bytes());
+            ecu.write_all(&reply[..37]).await.unwrap();
+            // Longer than the former 150 ms initial wait + 5 ms drain gap.
+            tokio::time::sleep(Duration::from_millis(180)).await;
+            ecu.write_all(&reply[37..]).await.unwrap();
+            let message = timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_str(&message.payload).unwrap();
+            assert_eq!(payload["source"], profile.source());
+            assert_eq!(payload["channels"]["rpm"], 6000.);
+            assert_eq!(payload["channels"]["coolantC"], 90.);
+            assert_eq!(payload["channels"]["batteryV"], 13.8);
+            assert_eq!(payload["partial"], false);
+            cancel.cancel();
+            timeout(Duration::from_secs(1), worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+    }
 
     #[test]
     fn test_print_help_no_panic() {
