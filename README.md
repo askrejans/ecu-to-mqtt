@@ -179,7 +179,7 @@ authentication — keep it on loopback or inside an authenticated tunnel.
 
 ```bash
 # Debian / Ubuntu
-curl -fsSL https://g86racing.com/packages/apt/gpg.key | sudo gpg --dearmor \
+curl -fsSL https://g86racing.com/packages/gpg.key | sudo gpg --dearmor \
      -o /usr/share/keyrings/g86racing-archive-keyring.gpg
 echo "deb [signed-by=/usr/share/keyrings/g86racing-archive-keyring.gpg] \
      https://g86racing.com/packages/apt stable main" \
@@ -187,6 +187,15 @@ echo "deb [signed-by=/usr/share/keyrings/g86racing-archive-keyring.gpg] \
 sudo apt update && sudo apt install ecu-to-mqtt
 
 # Fedora / RHEL / Rocky
+sudo tee /etc/yum.repos.d/g86racing.repo <<'EOF'
+[g86racing]
+name=G86Racing packages
+baseurl=https://g86racing.com/packages/rpm
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://g86racing.com/packages/gpg.key
+EOF
 sudo dnf install ecu-to-mqtt
 
 # macOS
@@ -392,6 +401,18 @@ git tag 0.5.0 && git push origin 0.5.0
 
 The workflow produces Linux `.deb`/`.rpm` (x86_64 + aarch64), macOS and Windows
 archives, `SHA256SUMS`, and a multi-arch `ghcr.io/askrejans/ecu-to-mqtt` image.
+
+Those assets are mirrored into the signed apt/dnf repositories and the Homebrew
+download directory on the G86 server with the infra publish script:
+
+```bash
+# in crowfoundry/codebase/infra/deploy
+export CF_PACKAGES_HOST=root@<ops-node-ip>
+./scripts/publish-packages.sh --repo askrejans/ecu-to-mqtt --tag 0.5.0
+# then, in the Homebrew tap
+./scripts/bump-formula.sh ecu-to-mqtt 0.5.0
+```
+
 To build packages locally instead:
 
 ```bash

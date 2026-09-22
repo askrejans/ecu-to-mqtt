@@ -228,10 +228,22 @@ build_binary() {
     fi
 
     # Verify the binary was actually produced – catches silent build failures.
+    # Reported by the caller too: `die` here only exits the command-substitution
+    # subshell, so the empty result must be checked outside it as well.
     [[ -f "$bin_out" ]] || \
-        die "Binary not found after build: $bin_out  (did compilation succeed?)"
+        warn "Binary not found after build: $bin_out  (did compilation succeed?)"
 
     echo "$bin_out"
+}
+
+# Compile and abort the whole run if nothing came out. Callers run inside
+# `build_x || warn`, where `set -e` does not apply, so this check must `die`.
+require_binary() {
+    local target="$1" path
+    path="$(build_binary "$target")"
+    [[ -n "$path" && -f "$path" ]] || \
+        die "Build failed for $target – no binary to package"
+    echo "$path"
 }
 
 # ---------------------------------------------------------------------------
@@ -242,7 +254,7 @@ build_deb() {
     require_cmd dpkg-deb "Install: sudo apt-get install dpkg-dev"
 
     local bin_path
-    bin_path="$(build_binary "$target")"
+    bin_path="$(require_binary "$target")"
     local deb_arch
     deb_arch="$(deb_arch_of "$target")"
 
@@ -322,7 +334,7 @@ build_rpm() {
     require_cmd rpmbuild "Install (Fedora/RHEL): sudo dnf install rpm-build"
 
     local bin_path
-    bin_path="$(build_binary "$target")"
+    bin_path="$(require_binary "$target")"
     local rpm_arch
     rpm_arch="$(rpm_arch_of "$target")"
 
@@ -463,7 +475,7 @@ EOF
 build_win_zip() {
     local target="$1"   # win-x86 or win-x64
     local bin_path
-    bin_path="$(build_binary "$target")"
+    bin_path="$(require_binary "$target")"
 
     local arch_label
     case "$target" in
@@ -507,7 +519,7 @@ EOF
 build_mac_targz() {
     local target="$1"   # mac-x64 or mac-arm64
     local bin_path
-    bin_path="$(build_binary "$target")"
+    bin_path="$(require_binary "$target")"
 
     local arch_label
     case "$target" in
