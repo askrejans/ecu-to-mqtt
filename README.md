@@ -386,24 +386,27 @@ sudo modprobe vcan && sudo ip link add dev vcan0 type vcan && sudo ip link set u
 cargo test -- --ignored
 ```
 
-CI runs all of the above plus a container build on every push
-([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+Run these checks locally before publishing a release. GitHub Actions are not
+used for this repository.
 
 ### Releasing
 
-Pushing a version tag builds every artifact and publishes a GitHub Release
-([.github/workflows/release.yml](.github/workflows/release.yml)):
+Build packages locally, then publish the resulting files through the package
+server. A version tag identifies source; pushing it does not build artifacts.
 
 ```bash
-# Cargo.toml version and tag must match (a leading "v" is optional)
-git tag 0.5.0 && git push origin 0.5.0
+./scripts/build_packages.sh
+# Review release/<version>/ and its checksums before uploading.
 ```
 
-The workflow produces Linux `.deb`/`.rpm` (x86_64 + aarch64), macOS and Windows
-archives, `SHA256SUMS`, and a multi-arch `ghcr.io/askrejans/ecu-to-mqtt` image.
+The local package script produces Linux `.deb`/`.rpm` (x86_64 + aarch64),
+macOS and Windows archives, and `SHA256SUMS`. Build and publish a container
+image separately if one is needed.
 
-Those assets are mirrored into the signed apt/dnf repositories and the Homebrew
-download directory on the G86 server with the infra publish script:
+The signed apt/dnf repositories and Homebrew download directory on the G86
+server require a manual upload and repository metadata refresh. The infra
+publish script below applies only when assets have already been uploaded to a
+GitHub Release:
 
 ```bash
 # in crowfoundry/codebase/infra/deploy
