@@ -14,8 +14,11 @@ Group=ecu-to-mqtt
 # Path to the binary
 ExecStart=/usr/bin/ecu-to-mqtt --config /etc/ecu-to-mqtt/settings.toml
 
-# Working directory (app writes no state; /tmp is always available)
+# Optional canonical telemetry archive stays in the service state directory
 WorkingDirectory=/tmp
+StateDirectory=ecu-to-mqtt
+StateDirectoryMode=0700
+UMask=0077
 
 # Restart policy
 Restart=always

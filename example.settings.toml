@@ -167,3 +167,5 @@ log_level = "info"
 
 # Enable JSON-formatted logs (useful for log aggregation / Grafana Loki)
 # log_json = false
+# Optional local canonical NDJSON archive; rotate/export before the 512 MiB cap.
+# telemetry_log = "/var/lib/ecu-to-mqtt/telemetry.ndjson"

@@ -9,6 +9,7 @@
 //! **Service mode** (no TTY / running under systemd): structured logging to
 //! stdout, same ECU polling logic.
 
+mod archive;
 mod can_input;
 mod can_profiles;
 mod can_socket;

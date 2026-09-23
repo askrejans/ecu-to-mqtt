@@ -19,6 +19,9 @@ pub const ENV_PREFIX: &str = "ECU_TO_MQTT";
 /// Main application configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// Optional absolute path for synced canonical NDJSON capture.
+    #[serde(default)]
+    pub telemetry_log: Option<String>,
     /// Read-only ECU protocol. See ECU_PROTOCOLS.md.
     #[serde(default)]
     pub ecu_protocol: crate::ecu_protocol::EcuProtocol,
@@ -191,6 +194,7 @@ fn default_log_level() -> String {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            telemetry_log: None,
             ecu_protocol: crate::ecu_protocol::EcuProtocol::default(),
             can_base_id: None,
             connection_type: default_connection_type(),
@@ -228,6 +232,16 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Validate all configuration values against acceptable ranges and constraints.
     pub fn validate(&self) -> Result<()> {
+        if self
+            .telemetry_log
+            .as_ref()
+            .is_some_and(|p| !std::path::Path::new(p).is_absolute())
+        {
+            return Err(ConfigError::ValidationFailed(
+                "telemetry_log must be an absolute path".into(),
+            )
+            .into());
+        }
         debug!("Validating configuration");
         let connection = self.connection_type.to_lowercase();
         if self.ecu_protocol.is_can() && connection != "can" && connection != "tcp" {

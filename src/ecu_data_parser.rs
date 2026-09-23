@@ -292,7 +292,7 @@ pub fn get_parsed_data(data: &[u8]) -> Result<SpeeduinoData> {
 
 /// Parse ECU data and optionally publish all parameters to MQTT.
 ///
-/// When `mqtt_sender` is `None` (MQTT disabled), only parsing happens – no
+/// When `mqtt_sender` is `None` (MQTT disabled), parsing and optional local archiving continue – no
 /// network I/O takes place.  Returns the parsed struct so callers (e.g. the
 /// TUI) can display it.
 pub async fn process_speeduino_realtime_data(
@@ -331,9 +331,7 @@ pub async fn process_speeduino_realtime_data(
     );
     let ecu_data = parse_realtime_data(data)?;
 
-    if let Some(sender) = mqtt_sender {
-        publish_speeduino_params_to_mqtt(sender, config, &ecu_data).await?;
-    }
+    publish_speeduino_params_to_mqtt(mqtt_sender, config, &ecu_data).await?;
 
     Ok(ecu_data)
 }
@@ -722,7 +720,7 @@ fn telemetry_frame(d: &SpeeduinoData, timestamp_ms: u64, boot_id: &str, sequence
 }
 
 async fn publish_speeduino_params_to_mqtt(
-    mqtt_sender: &mpsc::Sender<MqttMessage>,
+    mqtt_sender: Option<&mpsc::Sender<MqttMessage>>,
     config: &Arc<AppConfig>,
     d: &SpeeduinoData,
 ) -> Result<()> {
@@ -741,6 +739,10 @@ async fn publish_speeduino_params_to_mqtt(
         boot,
         SEQUENCE.fetch_add(1, Ordering::Relaxed),
     );
+    crate::archive::record(config.telemetry_log.as_deref(), &snapshot).await;
+    let Some(mqtt_sender) = mqtt_sender else {
+        return Ok(());
+    };
     match mqtt_sender.try_send(MqttMessage::new(
         build_topic_path(&config.mqtt_base_topic, "telemetry"),
         snapshot,
@@ -816,6 +818,29 @@ mod tests {
 
     fn zero_packet() -> [u8; 130] {
         [0u8; 130]
+    }
+
+    #[tokio::test]
+    async fn speeduino_archives_with_mqtt_disabled_or_queue_full() {
+        let path = std::env::temp_dir().join(format!(
+            "g86-speeduino-archive-{}-{}.ndjson",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let config = Arc::new(AppConfig {
+            telemetry_log: Some(path.to_string_lossy().into_owned()),
+            ..AppConfig::default()
+        });
+        let (sender, _receiver) = mpsc::channel(1);
+        sender.try_send(MqttMessage::new("occupied".into(), "1".into(), 0)).unwrap();
+        process_speeduino_realtime_data(&zero_packet(), &config, None).await.unwrap();
+        process_speeduino_realtime_data(&zero_packet(), &config, Some(&sender)).await.unwrap();
+        let saved = tokio::fs::read_to_string(&path).await.unwrap();
+        let frames: Vec<serde_json::Value> = saved.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["source"], "speeduino-primary-a");
+        assert!(frames[1]["sequence"].as_u64().unwrap() > frames[0]["sequence"].as_u64().unwrap());
+        tokio::fs::remove_file(path).await.unwrap();
     }
 
     // --- Length guards ---

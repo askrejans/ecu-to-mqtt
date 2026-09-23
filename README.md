@@ -453,3 +453,38 @@ Each Linux package installs `/usr/bin/ecu-to-mqtt`, the
 - [G86 Web Dashboard](https://github.com/askrejans/G86-web-dashboard) — web dashboard for MQTT telemetry
 
 Licensed under the MIT licence — see [LICENCE](LICENCE).
+
+## Local canonical archive (0.6.1)
+
+Set `telemetry_log` to an absolute NDJSON filename. Under the packaged systemd
+service, use `/var/lib/ecu-to-mqtt/telemetry.ndjson`; its private `StateDirectory`
+permits writes with the otherwise read-only service filesystem.
+
+Each decoded canonical packet is appended and its file data synchronized before
+live forwarding. The archive continues with MQTT disabled or unavailable. An
+active file is capped at 512 MiB. A write/capacity failure logs an error at most
+once per minute while live processing continues. Monitor the service journal and
+free storage; a failing archive is not silently represented as a successful save.
+Use reliable power/storage. A crash can leave the last line incomplete.
+
+Rotate by renaming, not `copytruncate`. The writer opens the path for each
+append, so the next packet creates a new private file. For example:
+
+```text
+/var/lib/ecu-to-mqtt/telemetry.ndjson {
+    daily
+    maxsize 64M
+    rotate 8
+    missingok
+    notifempty
+    compress
+    delaycompress
+    nocreate
+}
+```
+
+Run logrotate at least hourly if using `maxsize`. Rotation removes the oldest
+files after eight archives. Active-file caps are separate from total retention;
+check disk space and export evidence before rotation removes it. The raw archive
+is an independent capture file. It does not automatically create or upload G86
+sessions; record on the connected phone for timed sessions and cloud review.

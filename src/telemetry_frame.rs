@@ -47,6 +47,7 @@ pub async fn publish_at(
         channel_count = channels.len(),
         "Decoded ECU telemetry"
     );
+    crate::archive::record(config.telemetry_log.as_deref(), &payload).await;
     if let Some(sender) = sender {
         // Live telemetry must never block acquisition or graceful shutdown
         // behind a disconnected broker. Full queues drop the new sample;

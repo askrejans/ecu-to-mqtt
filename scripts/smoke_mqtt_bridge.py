@@ -100,6 +100,7 @@ def exercise(binary, directory, broker_port, profile, can_case=None):
 
         feeder = threading.Thread(target=feed, daemon=True)
         feeder.start()
+        archive = directory / f'{profile}.ndjson'
         config = directory / f'{profile}.toml'
         config.write_text(f'''ecu_protocol = "{profile}"
 connection_type = "tcp"
@@ -109,6 +110,7 @@ mqtt_host = "127.0.0.1"
 mqtt_port = {broker_port}
 mqtt_base_topic = "/g86-smoke/{profile}/"
 log_level = "warn"
+telemetry_log = "{archive}"
 ''')
         subscriber = subprocess.Popen(['mosquitto_sub', '-h', '127.0.0.1', '-p', str(broker_port),
             '-t', topic, '-C', '1', '-W', '10'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -128,6 +130,8 @@ log_level = "warn"
             assert payload.get('partial', False) == bool(can_case), payload
             assert payload['bootId'] and payload['sequence'] >= 0, payload
             assert payload['source'], payload
+            saved = [json.loads(line) for line in archive.read_text().splitlines()]
+            assert payload in saved, 'Canonical MQTT frame must already be in the local archive'
             print(f'PASS {profile}: ECU TCP → bridge → MQTT broker → subscriber', flush=True)
         finally:
             stop_stream.set()
