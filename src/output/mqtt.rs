@@ -8,13 +8,20 @@
 //! | `homeassistant` | `<prefix>/sensor/<node>/…/config`      | yes      | on connect      |
 //!
 //! `<base>/status` is `online`/`offline` (retained; `offline` is the last will).
+//!
+//! **On demand** (for consumers on slow links, such as the G86 display): a
+//! message on `<base>/telemetry/get` whose payload is a reply topic is
+//! answered with one snapshot of every fresh channel on that topic. The
+//! consumer asks again when it has used the answer, so it receives as much
+//! as it can take and never builds a backlog. No answer while the ECU link
+//! is down or the data is stale.
 //! Publishing never blocks acquisition: while the broker is unreachable live
 //! samples are dropped and counted, and state is re-sent after reconnecting.
 
 use crate::config::{AppConfig, MqttFormat};
 use crate::protocol::speeduino::{self, SpeeduinoData};
 use crate::sample::Stamped;
-use crate::shared::{Counters, LinkStatus, Shared};
+use crate::shared::{CHANNEL_MAX_AGE_MS, Counters, LinkStatus, Shared};
 use anyhow::{Context, Result};
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS, Transport};
 use serde_json::json;
@@ -29,6 +36,49 @@ const RECONNECT_MAX: Duration = Duration::from_secs(60);
 /// Legacy topics are not retained (a stale RPM must not outlive the engine),
 /// so unchanged values are re-sent this often for subscribers that join late.
 const LEGACY_REFRESH: Duration = Duration::from_secs(1);
+
+/// Requests per reply topic are answered at most this often.
+const DEMAND_MIN_INTERVAL: Duration = Duration::from_millis(10);
+const DEMAND_MAX_CLIENTS: usize = 32;
+
+/// A usable reply topic: 1–128 bytes of UTF-8, no wildcards, not a `$` system topic.
+pub fn valid_reply_topic(payload: &[u8]) -> Option<&str> {
+    let t = std::str::from_utf8(payload).ok()?.trim();
+    (!t.is_empty() && t.len() <= 128 && !t.contains(['+', '#', '\0']) && !t.starts_with('$'))
+        .then_some(t)
+}
+
+/// Snapshot of every fresh channel, shaped like the canonical envelope
+/// (`partial: false`, all channels). `None` when the ECU is not delivering.
+pub fn demand_reply(shared: &Shared) -> Option<String> {
+    let now = Instant::now();
+    let s = shared.read();
+    if !s.link.is_up() || s.sample_age_s(now)? * 1000.0 > CHANNEL_MAX_AGE_MS as f64 {
+        return None;
+    }
+    let mut captured = 0u64;
+    let channels: serde_json::Map<String, serde_json::Value> = s
+        .fresh_channels(now)
+        .map(|(k, c)| {
+            captured = captured.max(c.captured_ms);
+            (k.clone(), json!(c.value))
+        })
+        .collect();
+    if channels.is_empty() {
+        return None;
+    }
+    Some(
+        json!({
+            "schema": 1,
+            "source": s.protocol.name(),
+            "partial": false,
+            "timestampMs": captured,
+            "sequence": s.last_sequence,
+            "channels": channels,
+        })
+        .to_string(),
+    )
+}
 
 /// `base` + `sub` with exactly one slash between them.
 pub fn topic(base: &str, sub: &str) -> String {
@@ -237,8 +287,11 @@ pub async fn run(
 
     let el_shared = shared.clone();
     let el_cancel = cancel.clone();
+    let el_client = client.clone();
+    let demand_topic = topic(&config.mqtt_base_topic, "telemetry/get");
     let event_loop = tokio::spawn(async move {
         let mut delay = Duration::from_secs(1);
+        let mut answered: HashMap<String, Instant> = HashMap::new();
         el_shared.set_mqtt(LinkStatus::Connecting);
         loop {
             let polled = tokio::select! {
@@ -253,9 +306,35 @@ pub async fn run(
             match polled {
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
                     info!("MQTT connected");
+                    let _ = el_client.try_subscribe(demand_topic.clone(), QoS::AtMostOnce);
                     delay = Duration::from_secs(1);
                     let _ = conn_tx.send(true);
                     el_shared.set_mqtt(LinkStatus::Connected);
+                }
+                Ok(Event::Incoming(Packet::Publish(p))) if p.topic == demand_topic => {
+                    let Some(reply) = valid_reply_topic(&p.payload) else {
+                        continue;
+                    };
+                    let now = Instant::now();
+                    if answered
+                        .get(reply)
+                        .is_some_and(|t| now.duration_since(*t) < DEMAND_MIN_INTERVAL)
+                    {
+                        continue;
+                    }
+                    if answered.len() >= DEMAND_MAX_CLIENTS && !answered.contains_key(reply) {
+                        answered.retain(|_, t| now.duration_since(*t) < Duration::from_secs(10));
+                        if answered.len() >= DEMAND_MAX_CLIENTS {
+                            continue;
+                        }
+                    }
+                    answered.insert(reply.to_string(), now);
+                    if let Some(doc) = demand_reply(&el_shared) {
+                        match el_client.try_publish(reply, QoS::AtMostOnce, false, doc) {
+                            Ok(()) => Counters::inc(&el_shared.counters.mqtt_published),
+                            Err(_) => Counters::inc(&el_shared.counters.mqtt_dropped),
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -434,6 +513,59 @@ mod tests {
     use crate::protocol::{Channels, EcuProtocol};
     use crate::sample::Sample;
     use crate::shared::Info;
+
+    #[test]
+    fn demand_reply_topics_are_validated() {
+        assert_eq!(
+            valid_reply_topic(b"/GOLF86/DISPLAY/g86-display-2b84/ecu"),
+            Some("/GOLF86/DISPLAY/g86-display-2b84/ecu")
+        );
+        assert_eq!(valid_reply_topic(b" a/b \n"), Some("a/b"));
+        for bad in [
+            &b""[..],
+            b"a/+/b",
+            b"a/#",
+            b"$SYS/x",
+            &[0xff, 0xfe],
+            &[b'a'; 129],
+        ] {
+            assert_eq!(valid_reply_topic(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn demand_reply_needs_fresh_data_and_merges_channels() {
+        use crate::shared::ChannelState;
+        let shared = Shared::new(Info::default(), EcuProtocol::Speeduino, true);
+        assert_eq!(
+            demand_reply(&shared),
+            None,
+            "no answer before the first sample"
+        );
+        shared.set_link(LinkStatus::Connected, "test");
+        {
+            let mut s = shared.write();
+            s.last_sample_at = Some(Instant::now());
+            for (k, v) in [("rpm", 3000.0), ("coolantC", 88.0)] {
+                s.channels.insert(
+                    k.into(),
+                    ChannelState {
+                        value: v,
+                        captured_ms: 7,
+                        source: "test",
+                        at: Instant::now(),
+                    },
+                );
+            }
+        }
+        let doc: serde_json::Value = serde_json::from_str(&demand_reply(&shared).unwrap()).unwrap();
+        assert_eq!(doc["schema"], 1);
+        assert_eq!(doc["partial"], false);
+        assert_eq!(doc["channels"]["rpm"], 3000.0);
+        assert_eq!(doc["channels"]["coolantC"], 88.0);
+        shared.write().last_sample_at = Some(Instant::now() - Duration::from_secs(5));
+        assert_eq!(demand_reply(&shared), None, "stale data is not answered");
+    }
 
     #[test]
     fn topics_join_with_one_slash() {

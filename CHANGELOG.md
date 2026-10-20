@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+- On-demand telemetry for consumers on slow links. Publish a reply topic to
+  `<base>/telemetry/get` to receive one canonical envelope with the latest
+  fresh channels on it (QoS 0, not retained, nothing when the link is down or
+  the sample is stale). The consumer asks again after each answer, so it never
+  builds a backlog. Answers are rate limited to one per 10 ms per reply topic,
+  for up to 32 reply topics. Used by G86-ESP-DSP 0.2.
+
 ## 0.7.1
 
 ### Fixed

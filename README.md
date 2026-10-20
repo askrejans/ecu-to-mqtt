@@ -201,6 +201,15 @@ Select any combination with `mqtt_formats` (default `["canonical", "legacy"]`):
 | `json` | `<base>/state` | Retained document: fresh channels, full Speeduino packet, status bits, firmware; ≤ `mqtt_max_rate_hz` |
 | `homeassistant` | `homeassistant/sensor/<node>/…/config` | Discovery for RPM, throttle, MAP, boost, temperatures, AFR, lambda, battery, advance, oil pressure, speed; reads `<base>/state` |
 
+**On demand.** A consumer on a slow link (the G86-ESP-DSP display over
+Wi-Fi) need not take the 50 Hz stream. It publishes its own reply topic as the
+payload to `<base>/telemetry/get`, and ecu-to-mqtt answers once on that topic
+with the latest sample: a canonical envelope of the fresh channels (QoS 0, not
+retained). There is no answer while the ECU link is down or the sample is
+stale. The consumer asks again after using the answer, so it gets as many
+samples as it can handle and never a queue of old ones. Answers are rate
+limited to one per 10 ms per reply topic, for up to 32 reply topics.
+
 `<base>/status` is `online`/`offline` (retained, with a last will). State is
 re-sent after every reconnect. While the broker is unreachable live samples
 are dropped and counted, and acquisition never waits. TLS: `mqtt_use_tls`,
