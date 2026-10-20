@@ -3,18 +3,71 @@
 //! Handles loading, validation, and environment variable overrides for application configuration.
 //! Supports `.env` files via dotenvy, TOML config files, and `ECU_TO_MQTT_*` env var overrides.
 
-use crate::errors::{ConfigError, Result};
+use anyhow::{Context, Result, bail};
 use config::{Config, Environment, File};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 /// Valid baud rates for serial communication
 const VALID_BAUD_RATES: &[u32] = &[9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
 /// Prefix for environment variable overrides, e.g. `ECU_TO_MQTT_MQTT_HOST`.
 pub const ENV_PREFIX: &str = "ECU_TO_MQTT";
+
+/// Resolved `connection_type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionKind {
+    Serial,
+    Tcp,
+    Can,
+    Simulator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MqttFormat {
+    /// `<base>/telemetry` canonical envelope (G86 app contract)
+    Canonical,
+    /// Speeduino scalar topics (`<base>/RPM`, `<base>/CLT` …), change-detected
+    Legacy,
+    /// `<base>/state` complete JSON document (channels, Speeduino detail, status flags)
+    Json,
+    /// Home Assistant MQTT discovery for the main channels
+    Homeassistant,
+}
+
+fn default_mqtt_formats() -> Vec<MqttFormat> {
+    vec![MqttFormat::Canonical, MqttFormat::Legacy]
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringOrList {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn list_formats<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<MqttFormat>, D::Error> {
+    let items = match StringOrList::deserialize(d)? {
+        StringOrList::One(s) => s
+            .split([',', ';', ' '])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+        StringOrList::Many(v) => v,
+    };
+    items
+        .into_iter()
+        .map(|s| {
+            MqttFormat::deserialize(serde::de::value::StringDeserializer::<D::Error>::new(
+                s.to_lowercase(),
+            ))
+        })
+        .collect()
+}
 
 /// Main application configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,13 +77,14 @@ pub struct AppConfig {
     pub telemetry_log: Option<String>,
     /// Read-only ECU protocol. See ECU_PROTOCOLS.md.
     #[serde(default)]
-    pub ecu_protocol: crate::ecu_protocol::EcuProtocol,
+    pub ecu_protocol: crate::protocol::EcuProtocol,
     /// Override the profile CAN base identifier; frame format is profile-specific.
     #[serde(default)]
     pub can_base_id: Option<u32>,
     // --- Connection type ---
     /// Connection type: "serial" (hardware UART), "tcp" (raw TCP socket / WiFi
-    /// bridge / CAN gateway) or "can" (native SocketCAN interface, Linux only)
+    /// bridge / CAN gateway), "can" (native SocketCAN interface, Linux only) or
+    /// "simulator" (built-in Speeduino simulator)
     #[serde(default = "default_connection_type")]
     pub connection_type: String,
 
@@ -44,7 +98,8 @@ pub struct AppConfig {
     pub tcp_port: Option<u16>,
 
     // --- Serial port configuration (used when connection_type = "serial") ---
-    /// The serial port device path (e.g., "/dev/ttyACM0", "COM3")
+    /// Serial device path (e.g. "/dev/ttyACM0", "COM3"), or "auto" to find the
+    /// ECU by its signature on the available serial ports
     #[serde(default = "default_port_name")]
     pub port_name: String,
 
@@ -53,7 +108,8 @@ pub struct AppConfig {
     pub baud_rate: u32,
 
     /// Expected data packet length from ECU in bytes.
-    /// 130 = speeduino-serial-sim / older firmware, 138 = current Speeduino firmware (LOG_ENTRY_SIZE).
+    /// Only the first request uses it; the real length is learned from the reply
+    /// (firmware 2025.01 sends 130 bytes).
     #[serde(default = "default_expected_data_length")]
     pub expected_data_length: usize,
 
@@ -104,6 +160,37 @@ pub struct AppConfig {
     /// Path to client private key for TLS (optional)
     pub mqtt_client_key_path: Option<String>,
 
+    /// Read the MQTT password from a file (Docker/systemd secrets).
+    pub mqtt_password_file: Option<String>,
+
+    /// What to publish: canonical, legacy, json, homeassistant.
+    #[serde(default = "default_mqtt_formats", deserialize_with = "list_formats")]
+    pub mqtt_formats: Vec<MqttFormat>,
+
+    /// Cap for legacy scalar and JSON state topics (Hz); 0 = every sample.
+    /// The canonical envelope is never throttled.
+    #[serde(default = "default_mqtt_max_rate_hz")]
+    pub mqtt_max_rate_hz: f64,
+
+    /// Home Assistant discovery prefix.
+    #[serde(default = "default_ha_prefix")]
+    pub mqtt_homeassistant_prefix: String,
+
+    // --- HTTP API / web dashboard ---
+    #[serde(default)]
+    pub http_enabled: bool,
+    #[serde(default = "default_http_bind")]
+    pub http_bind: String,
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
+    /// Bearer token required for `/api/*` (health and metrics stay open).
+    pub http_token: Option<String>,
+    /// `Access-Control-Allow-Origin` for browser dashboards (unset = no CORS).
+    pub http_cors_origin: Option<String>,
+    /// Serve the built-in web dashboard at `/`.
+    #[serde(default = "default_true")]
+    pub http_ui: bool,
+
     // --- Application behaviour ---
     /// ECU data polling interval in milliseconds
     #[serde(default = "default_refresh_rate_ms")]
@@ -142,11 +229,26 @@ pub struct AppConfig {
 // ---------------------------------------------------------------------------
 // Default value functions
 // ---------------------------------------------------------------------------
+fn default_true() -> bool {
+    true
+}
+fn default_mqtt_max_rate_hz() -> f64 {
+    10.0
+}
+fn default_ha_prefix() -> String {
+    "homeassistant".to_string()
+}
+fn default_http_bind() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_http_port() -> u16 {
+    9091
+}
 fn default_connection_type() -> String {
     "serial".to_string()
 }
 fn default_port_name() -> String {
-    "/dev/ttyACM0".to_string()
+    "auto".to_string()
 }
 fn default_baud_rate() -> u32 {
     115200
@@ -193,241 +295,182 @@ fn default_log_level() -> String {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self {
-            telemetry_log: None,
-            ecu_protocol: crate::ecu_protocol::EcuProtocol::default(),
-            can_base_id: None,
-            connection_type: default_connection_type(),
-            can_interface: None,
-            tcp_host: None,
-            tcp_port: None,
-            port_name: default_port_name(),
-            baud_rate: default_baud_rate(),
-            expected_data_length: default_expected_data_length(),
-            read_timeout_ms: default_read_timeout_ms(),
-            mqtt_enabled: default_mqtt_enabled(),
-            mqtt_host: default_mqtt_host(),
-            mqtt_port: default_mqtt_port(),
-            mqtt_base_topic: default_mqtt_base_topic(),
-            mqtt_qos: default_mqtt_qos(),
-            mqtt_client_id: None,
-            mqtt_username: None,
-            mqtt_password: None,
-            mqtt_use_tls: false,
-            mqtt_ca_cert_path: None,
-            mqtt_client_cert_path: None,
-            mqtt_client_key_path: None,
-            refresh_rate_ms: default_refresh_rate_ms(),
-            max_retry_count: default_max_retry_count(),
-            initial_retry_delay_ms: default_initial_retry_delay_ms(),
-            max_retry_delay_ms: default_max_retry_delay_ms(),
-            message_buffer_size: default_message_buffer_size(),
-            log_level: default_log_level(),
-            log_json: false,
-            config_path: None,
-        }
+        // Every field has a serde default, so an empty document is a valid config.
+        serde_json::from_str("{}").expect("defaults deserialize")
     }
 }
 
 impl AppConfig {
+    pub fn connection_kind(&self) -> ConnectionKind {
+        match self.connection_type.to_lowercase().as_str() {
+            "tcp" => ConnectionKind::Tcp,
+            "can" => ConnectionKind::Can,
+            "simulator" => ConnectionKind::Simulator,
+            _ => ConnectionKind::Serial,
+        }
+    }
+
+    pub fn wants(&self, format: MqttFormat) -> bool {
+        self.mqtt_formats.contains(&format)
+    }
+
+    /// Settings as JSON with secrets masked (`--check-config`, `/api/v1/config`).
+    pub fn redacted(&self) -> serde_json::Value {
+        let mut v = serde_json::to_value(self).unwrap_or_default();
+        for key in ["mqtt_password", "http_token"] {
+            if v.get(key).is_some_and(|x| !x.is_null()) {
+                v[key] = "***".into();
+            }
+        }
+        v
+    }
+
+    /// Password from `mqtt_password_file` (trimmed) or `mqtt_password`.
+    pub fn mqtt_password(&self) -> Result<Option<String>> {
+        match &self.mqtt_password_file {
+            Some(path) => Ok(Some(
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("reading mqtt_password_file {path}"))?
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string(),
+            )),
+            None => Ok(self.mqtt_password.clone()),
+        }
+    }
+
     /// Validate all configuration values against acceptable ranges and constraints.
     pub fn validate(&self) -> Result<()> {
         if self
             .telemetry_log
             .as_ref()
-            .is_some_and(|p| !std::path::Path::new(p).is_absolute())
+            .is_some_and(|p| !Path::new(p).is_absolute())
         {
-            return Err(ConfigError::ValidationFailed(
-                "telemetry_log must be an absolute path".into(),
-            )
-            .into());
+            bail!("telemetry_log must be an absolute path");
         }
-        debug!("Validating configuration");
         let connection = self.connection_type.to_lowercase();
-        if self.ecu_protocol.is_can() && connection != "can" && connection != "tcp" {
-            return Err(ConfigError::ValidationFailed(
+        let protocol = self.ecu_protocol;
+        if protocol.is_can()
+            && connection != "can"
+            && connection != "tcp"
+            && connection != "simulator"
+        {
+            bail!(
                 "CAN profiles require connection_type = \"can\" (SocketCAN) or \"tcp\" (CAN gateway)"
-                    .into(),
-            )
-            .into());
+            );
         }
-        if !self.ecu_protocol.is_can() && connection == "can" {
-            return Err(ConfigError::ValidationFailed(format!(
+        if !protocol.is_can() && connection == "can" {
+            bail!(
                 "connection_type = \"can\" needs a CAN profile; {} is a serial protocol",
-                self.ecu_protocol.name()
-            ))
-            .into());
+                protocol.name()
+            );
         }
+        let limit = if protocol.extended() {
+            0x1fff_ffff
+        } else {
+            0x7ff
+        };
         if self.can_base_id.is_some_and(|id| {
-            id.checked_add(self.ecu_protocol.last_can_offset())
-                .is_none_or(|last| {
-                    last > if self.ecu_protocol.extended() {
-                        0x1fffffff
-                    } else {
-                        0x7ff
-                    }
-                })
+            id.checked_add(protocol.last_can_offset())
+                .is_none_or(|last| last > limit)
         }) {
-            return Err(ConfigError::ValidationFailed(
-                "CAN base identifier leaves no room for broadcast groups".into(),
-            )
-            .into());
+            bail!("CAN base identifier leaves no room for broadcast groups");
         }
-
         match connection.as_str() {
             "can" => {
                 if self
                     .can_interface
                     .as_deref()
-                    .map(|name| name.trim().is_empty())
-                    .unwrap_or(true)
+                    .is_none_or(|n| n.trim().is_empty())
                 {
-                    return Err(ConfigError::MissingField(
-                        "can_interface (required when connection_type = \"can\")".to_string(),
-                    )
-                    .into());
+                    bail!("can_interface is required when connection_type = \"can\"");
                 }
             }
             "serial" => {
                 if self.port_name.is_empty() {
-                    return Err(ConfigError::MissingField("port_name".to_string()).into());
+                    bail!("port_name must not be empty (use \"auto\" to detect)");
                 }
                 if !VALID_BAUD_RATES.contains(&self.baud_rate) {
-                    return Err(ConfigError::InvalidValue {
-                        field: "baud_rate".to_string(),
-                        message: format!("must be one of: {:?}", VALID_BAUD_RATES),
-                    }
-                    .into());
+                    bail!("baud_rate must be one of {VALID_BAUD_RATES:?}");
                 }
             }
             "tcp" => {
-                if self
-                    .tcp_host
-                    .as_deref()
-                    .map(|h| h.is_empty())
-                    .unwrap_or(true)
-                {
-                    return Err(ConfigError::MissingField(
-                        "tcp_host (required when connection_type = \"tcp\")".to_string(),
-                    )
-                    .into());
+                if self.tcp_host.as_deref().is_none_or(str::is_empty) {
+                    bail!("tcp_host is required when connection_type = \"tcp\"");
                 }
                 if self.tcp_port.is_none() {
-                    return Err(ConfigError::MissingField(
-                        "tcp_port (required when connection_type = \"tcp\")".to_string(),
-                    )
-                    .into());
+                    bail!("tcp_port is required when connection_type = \"tcp\"");
                 }
             }
-            other => {
-                return Err(ConfigError::InvalidValue {
-                    field: "connection_type".to_string(),
-                    message: format!("must be \"serial\", \"tcp\" or \"can\", got \"{}\"", other),
-                }
-                .into());
-            }
+            "simulator" => {}
+            other => bail!(
+                "connection_type must be \"serial\", \"tcp\", \"can\" or \"simulator\", got \"{other}\""
+            ),
         }
-
-        if self.ecu_protocol == crate::ecu_protocol::EcuProtocol::Speeduino
-            && (self.expected_data_length < 119 || self.expected_data_length > 256)
-        {
-            return Err(ConfigError::InvalidValue {
-                field: "expected_data_length".to_string(),
-                message: "must be between 119 and 256".to_string(),
-            }
-            .into());
+        if !(119..=256).contains(&self.expected_data_length) {
+            bail!("expected_data_length must be between 119 and 256");
         }
-
         if self.read_timeout_ms == 0 || self.read_timeout_ms > 30000 {
-            return Err(ConfigError::InvalidValue {
-                field: "read_timeout_ms".to_string(),
-                message: "must be between 1 and 30000 milliseconds".to_string(),
-            }
-            .into());
+            bail!("read_timeout_ms must be between 1 and 30000");
         }
-
         if self.mqtt_enabled {
             if self.mqtt_host.is_empty() {
-                return Err(ConfigError::MissingField("mqtt_host".to_string()).into());
+                bail!("mqtt_host must not be empty");
             }
             if self.mqtt_port == 0 {
-                return Err(ConfigError::InvalidValue {
-                    field: "mqtt_port".to_string(),
-                    message: "must be greater than 0".to_string(),
-                }
-                .into());
+                bail!("mqtt_port must be greater than 0");
             }
-            if self.mqtt_base_topic.is_empty() {
-                return Err(ConfigError::MissingField("mqtt_base_topic".to_string()).into());
+            if self.mqtt_base_topic.trim_matches('/').is_empty()
+                || self.mqtt_base_topic.contains(['#', '+'])
+            {
+                bail!("mqtt_base_topic must be a non-empty topic without wildcards");
             }
             if !(0..=2).contains(&self.mqtt_qos) {
-                return Err(ConfigError::InvalidValue {
-                    field: "mqtt_qos".to_string(),
-                    message: "must be 0, 1, or 2".to_string(),
-                }
-                .into());
+                bail!("mqtt_qos must be 0, 1 or 2");
             }
-            if self.mqtt_use_tls
-                && let Some(ref ca_path) = self.mqtt_ca_cert_path
-                && !Path::new(ca_path).exists()
+            if let Some(ca) = &self.mqtt_ca_cert_path
+                && !Path::new(ca).exists()
             {
-                return Err(ConfigError::InvalidValue {
-                    field: "mqtt_ca_cert_path".to_string(),
-                    message: format!("file does not exist: {}", ca_path),
-                }
-                .into());
+                bail!("mqtt_ca_cert_path does not exist: {ca}");
+            }
+            if self.mqtt_client_cert_path.is_some() != self.mqtt_client_key_path.is_some() {
+                bail!("mqtt_client_cert_path and mqtt_client_key_path must be set together");
             }
             if self.message_buffer_size == 0 {
-                return Err(ConfigError::InvalidValue {
-                    field: "message_buffer_size".to_string(),
-                    message: "must be greater than 0".to_string(),
-                }
-                .into());
+                bail!("message_buffer_size must be greater than 0");
+            }
+            if self.mqtt_formats.is_empty() {
+                bail!(
+                    "mqtt_formats must list at least one of canonical, legacy, json, homeassistant"
+                );
+            }
+            if !(self.mqtt_max_rate_hz.is_finite() && self.mqtt_max_rate_hz >= 0.0) {
+                bail!("mqtt_max_rate_hz must be >= 0");
             }
         }
-
+        if self.http_enabled {
+            if self.http_port == 0 {
+                bail!("http_port must be greater than 0");
+            }
+            self.http_bind
+                .parse::<std::net::IpAddr>()
+                .context("http_bind must be an IP address such as 127.0.0.1 or 0.0.0.0")?;
+        }
         if self.refresh_rate_ms == 0 || self.refresh_rate_ms > 10000 {
-            return Err(ConfigError::InvalidValue {
-                field: "refresh_rate_ms".to_string(),
-                message: "must be between 1 and 10000 milliseconds".to_string(),
-            }
-            .into());
+            bail!("refresh_rate_ms must be between 1 and 10000");
         }
-
         if self.max_retry_count == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "max_retry_count".to_string(),
-                message: "must be greater than 0".to_string(),
-            }
-            .into());
+            bail!("max_retry_count must be greater than 0");
         }
-
         if self.initial_retry_delay_ms == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "initial_retry_delay_ms".to_string(),
-                message: "must be greater than 0".to_string(),
-            }
-            .into());
+            bail!("initial_retry_delay_ms must be greater than 0");
         }
-
         if self.max_retry_delay_ms < self.initial_retry_delay_ms {
-            return Err(ConfigError::InvalidValue {
-                field: "max_retry_delay_ms".to_string(),
-                message: "must be >= initial_retry_delay_ms".to_string(),
-            }
-            .into());
+            bail!("max_retry_delay_ms must be >= initial_retry_delay_ms");
         }
-
-        let valid_log_levels = ["trace", "debug", "info", "warn", "error"];
-        if !valid_log_levels.contains(&self.log_level.to_lowercase().as_str()) {
-            return Err(ConfigError::InvalidValue {
-                field: "log_level".to_string(),
-                message: format!("must be one of: {:?}", valid_log_levels),
-            }
-            .into());
+        let levels = ["trace", "debug", "info", "warn", "error"];
+        if !levels.contains(&self.log_level.to_lowercase().as_str()) {
+            bail!("log_level must be one of {levels:?}");
         }
-
-        info!("Configuration validation successful");
         Ok(())
     }
 
@@ -435,6 +478,7 @@ impl AppConfig {
     pub fn connection_display(&self) -> String {
         match self.connection_type.to_lowercase().as_str() {
             "can" => format!("CAN {}", self.can_interface.as_deref().unwrap_or("?")),
+            "simulator" => "simulator".to_string(),
             "tcp" => format!(
                 "TCP {}:{}",
                 self.tcp_host.as_deref().unwrap_or("?"),
@@ -442,34 +486,6 @@ impl AppConfig {
             ),
             _ => format!("{} @ {} baud", self.port_name, self.baud_rate),
         }
-    }
-
-    /// Log a sanitised configuration summary (passwords/keys are redacted).
-    #[allow(dead_code)]
-    pub fn display_summary(&self) {
-        info!("=== Configuration Summary ===");
-        info!(
-            "Connection: {} ({})",
-            self.connection_type,
-            self.connection_display()
-        );
-        if self.mqtt_enabled {
-            info!("MQTT Broker: {}:{}", self.mqtt_host, self.mqtt_port);
-            info!("MQTT Base Topic: {}", self.mqtt_base_topic);
-            info!("MQTT QoS: {}", self.mqtt_qos);
-            if self.mqtt_use_tls {
-                info!("MQTT TLS: enabled");
-            }
-            if self.mqtt_username.is_some() {
-                info!("MQTT Auth: enabled (credentials redacted)");
-            }
-        } else {
-            info!("MQTT: disabled (display-only / TUI mode)");
-        }
-        info!("Refresh Rate: {}ms", self.refresh_rate_ms);
-        info!("Max Retry Count: {}", self.max_retry_count);
-        info!("Log Level: {}", self.log_level);
-        info!("============================");
     }
 }
 
@@ -521,9 +537,6 @@ fn candidate_paths() -> Vec<std::path::PathBuf> {
 pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig> {
     // Load .env file if present (silently ignored when missing)
     dotenvy::dotenv().ok();
-
-    info!("Loading configuration");
-
     let mut builder = Config::builder();
 
     let loaded_from = if let Some(path) = config_path {
@@ -544,31 +557,18 @@ pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig> {
             }
         }
 
-        if found_path.is_none() {
-            warn!("No configuration file found; using defaults and environment variables");
-        }
-
         found_path
     };
 
     builder = builder.add_source(env_source(None));
 
-    let settings = builder
+    let mut app_config: AppConfig = builder
         .build()
-        .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
-
-    let mut app_config: AppConfig = settings
+        .context("failed to read configuration")?
         .try_deserialize()
-        .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
-
+        .context("invalid configuration")?;
     app_config.config_path = loaded_from;
     app_config.validate()?;
-
-    match &app_config.config_path {
-        Some(path) => info!("Configuration loaded from: {}", path),
-        None => info!("Configuration loaded from defaults and environment"),
-    }
-
     Ok(app_config)
 }
 
@@ -576,7 +576,7 @@ pub fn load_configuration(config_path: Option<&str>) -> Result<AppConfig> {
 mod tests {
     use super::*;
 
-    use crate::ecu_protocol::EcuProtocol;
+    use crate::protocol::EcuProtocol;
     use std::fs;
     use tempfile::tempdir;
 
@@ -904,7 +904,88 @@ mod tests {
     #[test]
     fn test_connection_display_serial() {
         let config = AppConfig::default();
+        assert_eq!(config.connection_display(), "auto @ 115200 baud");
+        let config = AppConfig {
+            port_name: "/dev/ttyACM0".into(),
+            ..AppConfig::default()
+        };
         assert!(config.connection_display().contains("/dev/ttyACM0"));
+    }
+
+    #[test]
+    fn plug_and_play_defaults() {
+        let c = AppConfig::default();
+        assert_eq!(c.ecu_protocol, EcuProtocol::Auto);
+        assert_eq!(c.port_name, "auto");
+        assert_eq!(c.mqtt_formats, [MqttFormat::Canonical, MqttFormat::Legacy]);
+        assert_eq!(c.http_bind, "127.0.0.1");
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn new_keys_from_environment() {
+        let config: AppConfig = Config::builder()
+            .add_source(env_source(Some(HashMap::from([
+                (
+                    "ECU_TO_MQTT_MQTT_FORMATS".to_string(),
+                    "canonical, json,homeassistant".to_string(),
+                ),
+                ("ECU_TO_MQTT_HTTP_ENABLED".to_string(), "true".to_string()),
+                ("ECU_TO_MQTT_HTTP_TOKEN".to_string(), "12345".to_string()),
+                (
+                    "ECU_TO_MQTT_CONNECTION_TYPE".to_string(),
+                    "simulator".to_string(),
+                ),
+            ]))))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(
+            config.mqtt_formats,
+            [
+                MqttFormat::Canonical,
+                MqttFormat::Json,
+                MqttFormat::Homeassistant
+            ]
+        );
+        assert!(config.http_enabled);
+        assert_eq!(config.http_token.as_deref(), Some("12345"));
+        assert_eq!(config.connection_kind(), ConnectionKind::Simulator);
+        config.validate().unwrap();
+        assert_eq!(config.redacted()["http_token"], "***");
+    }
+
+    #[test]
+    fn new_keys_are_validated() {
+        for mutate in [
+            (|c: &mut AppConfig| c.mqtt_formats.clear()) as fn(&mut AppConfig),
+            |c| c.mqtt_base_topic = "a/#".into(),
+            |c| c.mqtt_max_rate_hz = -1.0,
+            |c| c.mqtt_client_cert_path = Some("c.pem".into()),
+            |c| {
+                c.http_enabled = true;
+                c.http_bind = "localhost".into()
+            },
+            |c| c.connection_type = "usb".into(),
+        ] {
+            let mut c = AppConfig::default();
+            mutate(&mut c);
+            assert!(c.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn password_file_wins_and_is_trimmed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("pw");
+        fs::write(&path, "s3cret\n").unwrap();
+        let c = AppConfig {
+            mqtt_password: Some("ignored".into()),
+            mqtt_password_file: Some(path.to_string_lossy().into_owned()),
+            ..AppConfig::default()
+        };
+        assert_eq!(c.mqtt_password().unwrap().as_deref(), Some("s3cret"));
     }
 
     #[test]

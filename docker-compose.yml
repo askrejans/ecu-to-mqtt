@@ -1,60 +1,77 @@
 services:
 
   ecu-to-mqtt:
-    # ── Image ────────────────────────────────────────────────────────────────
-    # Option A – build locally from source:
+    # Option A – build locally from source
     build: .
-    # Option B – use the pre-built image from the registry:
+    # Option B – pre-built image
     # image: ghcr.io/askrejans/ecu-to-mqtt:latest
 
     restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
 
-    # ── Serial device (serial connection only) ───────────────────────────────
-    # Uncomment and adjust if connecting via USB/serial port.
-    # Common paths: /dev/ttyACM0, /dev/ttyUSB0, /dev/ttyS0
+    # ── Serial ECU ───────────────────────────────────────────────────────────
+    # Map the device (auto-detection then finds it inside the container).
+    # Stable paths under /dev/serial/by-id/ survive re-plugging.
     # devices:
     #   - /dev/ttyACM0:/dev/ttyACM0
 
     environment:
-
-      # ── ECU profile ─────────────────────────────────────────────────────────
-      # speeduino (default), ms2, ms3, ms3_pro, microsquirt or a CAN profile.
+      # auto | speeduino | ms2 | ms3 | ms3_pro | microsquirt | <CAN profile>
       # See ECU_PROTOCOLS.md; examples/ has one config per profile.
-      ECU_TO_MQTT_ECU_PROTOCOL: speeduino
+      ECU_TO_MQTT_ECU_PROTOCOL: auto
 
-      # ── Connection type ─────────────────────────────────────────────────────
-      # "serial" – direct USB/serial (uncomment devices block above)
-      # "tcp"    – Wi-Fi / Ethernet serial bridge (ESP32, Moxa, USR-VIS410 …)
-      #            or the CAN gateway (scripts/can_gateway.py) for CAN profiles
+      # serial | tcp (serial bridge or CAN gateway) | can (SocketCAN) | simulator
       ECU_TO_MQTT_CONNECTION_TYPE: serial
-
-      # ── Serial settings (used when CONNECTION_TYPE=serial) ──────────────────
-      ECU_TO_MQTT_PORT_NAME: /dev/ttyACM0   # device path inside the container
+      ECU_TO_MQTT_PORT_NAME: auto            # or /dev/ttyACM0
       ECU_TO_MQTT_BAUD_RATE: "115200"
 
-      # ── TCP settings (used when CONNECTION_TYPE=tcp) ─────────────────────────
-      # ECU_TO_MQTT_TCP_HOST: 192.168.1.100  # serial bridge or CAN gateway host
-      # ECU_TO_MQTT_TCP_PORT: "23"           # 29536 for the bundled CAN gateway
+      # TCP serial bridge / CAN gateway
+      # ECU_TO_MQTT_TCP_HOST: 192.168.1.100
+      # ECU_TO_MQTT_TCP_PORT: "23"           # 29536 for scripts/can_gateway.py
       # ECU_TO_MQTT_CAN_BASE_ID: "864"       # CAN profiles only, decimal
 
-      # ── Native SocketCAN (Linux host) ────────────────────────────────────────
-      # Needs network_mode: host and cap_add: [NET_ADMIN] on this service.
+      # Native SocketCAN needs network_mode: host on this service.
       # ECU_TO_MQTT_CONNECTION_TYPE: can
       # ECU_TO_MQTT_CAN_INTERFACE: can0
 
-      # ── MQTT broker ──────────────────────────────────────────────────────────
-      ECU_TO_MQTT_MQTT_ENABLED: "true"       # set "false" for display/log-only mode
-      ECU_TO_MQTT_MQTT_HOST: mqtt.local      # broker IP or hostname
+      # MQTT
+      ECU_TO_MQTT_MQTT_ENABLED: "true"
+      ECU_TO_MQTT_MQTT_HOST: mqtt.local
       ECU_TO_MQTT_MQTT_PORT: "1883"
       ECU_TO_MQTT_MQTT_BASE_TOPIC: /CAR/ECU/
-      # ECU_TO_MQTT_MQTT_USERNAME: ""
-      # ECU_TO_MQTT_MQTT_PASSWORD: ""
+      ECU_TO_MQTT_MQTT_FORMATS: canonical,legacy   # + json, homeassistant
+      # ECU_TO_MQTT_MQTT_USERNAME: ecu
+      # ECU_TO_MQTT_MQTT_PASSWORD_FILE: /run/secrets/mqtt_password
 
-      # ── Logging ──────────────────────────────────────────────────────────────
-      # trace | debug | info | warn | error
+      # HTTP API, web dashboard, Prometheus (bind 0.0.0.0 inside the container)
+      ECU_TO_MQTT_HTTP_ENABLED: "true"
+      ECU_TO_MQTT_HTTP_BIND: 0.0.0.0
+      ECU_TO_MQTT_HTTP_PORT: "9091"
+      # ECU_TO_MQTT_HTTP_TOKEN: change-me
+
       ECU_TO_MQTT_LOG_LEVEL: info
 
-    # ── Optional: mount a settings.toml instead of / in addition to env vars ──
-    # Env vars always take priority over the file.
+    ports:
+      - "127.0.0.1:9091:9091"     # HTTP API / dashboard / metrics (loopback only)
+
+    healthcheck:
+      test: ["CMD", "ecu-to-mqtt", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+    # secrets:
+    #   - mqtt_password
+
+    # Mount a settings.toml instead of / in addition to env vars (env wins)
     # volumes:
     #   - ./settings.toml:/etc/ecu-to-mqtt/settings.toml:ro
+
+# secrets:
+#   mqtt_password:
+#     file: ./mqtt_password.txt

@@ -30,6 +30,15 @@ CAN_CASES = [
 ]
 
 
+SIGNATURES = {
+    'speeduino': 'speeduino 202501',
+    'ms2': 'MS2Extra comms342hP',
+    'ms3': 'MS3 Format 0566.06',
+    'ms3_pro': 'MS3 Pro Format 0566.06',
+    'microsquirt': 'MS2Extra comms342hP',
+}
+
+
 def free_port():
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
@@ -67,22 +76,34 @@ def exercise(binary, directory, broker_port, profile, can_case=None):
                             stream.sendall(packet[:11])
                             stream.sendall(packet[11:])
                         else:
-                            expected = b'A' if profile == 'speeduino' else b'a\x00\x06'
-                            command = bytearray()
-                            while len(command) < len(expected):
-                                data = stream.recv(len(expected) - len(command))
-                                if not data:
-                                    return
-                                command.extend(data)
-                            if command != expected:
-                                raise AssertionError(f'Unexpected ECU write: {command!r}')
+                            def read(count):
+                                data = bytearray()
+                                while len(data) < count:
+                                    chunk = stream.recv(count - len(data))
+                                    if not chunk:
+                                        return None
+                                    data.extend(chunk)
+                                return bytes(data)
+
+                            # Read-only contract: only Q (signature), A or 'a' 00 06.
+                            command = read(1)
+                            if command is None:
+                                return
+                            if command == b'Q':
+                                stream.sendall(SIGNATURES[profile].encode())
+                                continue
                             if profile == 'speeduino':
-                                packet = bytearray(138)
+                                if command != b'A':
+                                    raise AssertionError(f'Unexpected ECU write: {command!r}')
+                                packet = bytearray(130)
                                 packet[6:11] = bytes([65, 130, 100, 138, 147])
                                 packet[14:16] = (6000).to_bytes(2, 'little')
                                 packet[25] = 75
                                 stream.sendall(packet)
                                 continue
+                            rest = read(2)
+                            if command + (rest or b'') != b'a\x00\x06':
+                                raise AssertionError(f'Unexpected ECU write: {command + (rest or b"")!r}')
                             packet = bytearray(112)
                             packet[6:8] = (6000).to_bytes(2, 'big')
                             packet[22:24] = (1940).to_bytes(2, 'big')
@@ -109,7 +130,7 @@ tcp_port = {listener.getsockname()[1]}
 mqtt_host = "127.0.0.1"
 mqtt_port = {broker_port}
 mqtt_base_topic = "/g86-smoke/{profile}/"
-log_level = "warn"
+log_level = "debug"
 telemetry_log = "{archive}"
 ''')
         subscriber = subprocess.Popen(['mosquitto_sub', '-h', '127.0.0.1', '-p', str(broker_port),
@@ -118,11 +139,14 @@ telemetry_log = "{archive}"
         try:
             environment = {key: value for key, value in os.environ.items()
                            if not key.startswith('ECU_TO_MQTT_')}
+            log = (directory / f'{profile}.log').open('w')
             process = subprocess.Popen([str(binary), '--config', str(config)], cwd=directory,
-                env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                env=environment, stdout=log, stderr=subprocess.STDOUT)
             output, error = subscriber.communicate(timeout=12)
             if subscriber.returncode:
-                raise AssertionError(f'{profile}: MQTT subscription failed: {error}')
+                stop(process)
+                tail = (directory / f'{profile}.log').read_text().splitlines()[-15:]
+                raise AssertionError(f'{profile}: MQTT subscription failed: {error}\n' + '\n'.join(tail))
             payload = json.loads(output)
             assert payload['schema'] == 1, payload
             assert abs(payload['channels']['rpm'] - 6000) < .2, payload

@@ -1,6 +1,6 @@
 //! Manufacturer CAN profiles. Decode only received groups: a slow temperature
 //! packet must not refresh a stopped RPM stream. See ECU_PROTOCOLS.md for sources.
-use crate::ecu_protocol::{CanInputFrame, Channels, EcuProtocol, add, signed, unsigned};
+use super::{CanInputFrame, Channels, EcuProtocol, add, signed, unsigned};
 use crate::errors::Result;
 
 fn le(data: &[u8], offset: usize) -> f64 {
@@ -228,8 +228,8 @@ pub fn decode(protocol: EcuProtocol, base: u32, frame: &CanInputFrame) -> Result
 
 #[cfg(test)]
 mod tests {
+    use super::super::decode_can;
     use super::*;
-    use crate::ecu_protocol::decode_can;
     fn frame(protocol: EcuProtocol, offset: u32, data: [u8; 8]) -> Channels {
         decode_can(
             protocol,

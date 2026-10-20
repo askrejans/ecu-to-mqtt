@@ -1,11 +1,9 @@
-# ECU protocols — version 0.5.0
+# ECU protocols — version 0.7.0
 
-The bridge reads telemetry from Speeduino, MegaSquirt and six additional ECU
-families, read-only. Version 0.5.0 renamed the project from
-`speeduino-to-mqtt` to `ecu-to-mqtt`. Protocol names, configuration keys and the
-canonical JSON schema are unchanged, but the environment prefix is now
-`ECU_TO_MQTT_` and the default base topic is `/ECU/`; update any service unit,
-`.env` file or broker ACL that relied on the old names.
+The gateway reads telemetry from Speeduino, MegaSquirt and six additional ECU
+families, read-only. This document lists the exact broadcasts, firmware
+boundaries and channel lists. Configuration and outputs are described in the
+[README](README.md); design and contracts in [TECHNICAL.md](TECHNICAL.md).
 
 Select the **broadcast protocol configured in the ECU**, not just its brand.
 CAN layouts are manufacturer-specific. A CAN socket is not an automatic decoder
@@ -16,7 +14,8 @@ commands. Sensor availability depends on ECU firmware, wiring and configuration.
 
 | `ecu_protocol` | ECU / required output | Connection and default CAN base | Decoded channels |
 |---|---|---|---|
-| `speeduino` (default) | Existing Speeduino primary `A` output layout | Serial or raw serial-over-TCP; usually 115200 baud | Existing legacy topics plus canonical RPM, TPS, MAP, coolant, intake, battery, ignition and AFR |
+| `auto` (default) | Serial ECU answering `Q` with a Speeduino or MegaSquirt signature | Serial or raw serial-over-TCP | As the detected profile |
+| `speeduino` | Speeduino primary `A` output (firmware 2025.01: 130 bytes) | Serial or raw serial-over-TCP; usually 115200 baud | Legacy scalar topics plus canonical RPM, TPS, MAP, boost, baro, coolant, intake, battery, ignition, AFR, AFR target, VE, pulse width, dwell, sync losses; all status bits |
 | `ms2` | MS2/Extra 3.3+ compatibility output | Serial or raw serial-over-TCP | RPM, TPS, MAP, coolant, intake, battery, ignition, AFR |
 | `ms3` | MS3 1.2+ compatibility output | Serial or raw serial-over-TCP | Same compatibility subset |
 | `ms3_pro` | MS3Pro with the MS3 compatibility command | Serial or raw serial-over-TCP | Same compatibility subset |
@@ -126,11 +125,26 @@ gateway and consuming phone clocks synchronized. A custom gateway may omit
 `timestampMs`, in which case receipt time is used; this cannot identify stale
 data buffered by that custom gateway.
 
+## Identification
+
+Serial profiles first send `Q` and read the signature (`speeduino 202501`,
+`MS3 Format …`, `MS2Extra …`). With `ecu_protocol = "auto"` the signature picks
+the profile. With an explicit profile a mismatching signature only logs a
+warning. A silent ECU is still polled. Apart from `Q` the gateway sends only the
+profile's poll (`A` or `a 00 06`); none of these changes ECU state.
+
+The Speeduino poll requests `A` and reads until the expected length arrives.
+Until the first reply confirms the length it reads to a 25 ms idle gap, so a
+build with a longer packet is recognised instead of truncated. The learned
+length is then fixed for the connection. After `max_retry_count` consecutive
+failed polls the link is reopened.
+
 ## MQTT and G86
 
 Every profile publishes canonical JSON on `<mqtt_base_topic>/telemetry`.
-Trailing slashes are normalized. Speeduino also retains its existing legacy
-scalar topics; the new profiles publish the canonical topic only.
+Trailing slashes are normalized. Speeduino can also publish its legacy scalar
+topics (`legacy` format); every profile can publish the `json` state document
+and Home Assistant discovery. See the README for `mqtt_formats`.
 
 ```json
 {"schema":1,"source":"haltech-can-v2","bootId":"bridge-start-id","sequence":42,"timestampMs":1750000000000,"partial":true,"channels":{"rpm":6000,"manifoldKpa":101.3,"throttle":75.0}}
@@ -172,7 +186,7 @@ not redistributed in this repository.
 
 - [MegaSquirt serial protocol, 2014-10-28](https://www.msextra.com/doc/pdf/Megasquirt_Serial_Protocol-2014-10-28.pdf): 112-byte compatibility command, offsets and units.
 - [MegaSquirt CAN broadcasting](https://www.msextra.com/doc/pdf/Megasquirt_CAN_Broadcast.pdf): dash and realtime base IDs and groups.
-- [Speeduino interface protocol](https://wiki.speeduino.com/en/reference/Interface_Protocol): existing primary command. The legacy parser is retained; verify its packet layout against the firmware installed on your Speeduino.
+- [Speeduino interface protocol](https://wiki.speeduino.com/en/reference/Interface_Protocol) and the firmware source (`logger.cpp` `getTSLogEntry()`, `globals.h` bit definitions, release 202501.6): packet layout and status bits.
 - [Haltech CAN protocol library](https://support.haltech.com/portal/en/kb/haltech/technical-library/haltech-can-protocol-information): V2 specification, Kelvin temperatures, gauge-pressure offsets, signed gear and G units.
 - [MaxxECU default CAN protocol](https://www.maxxecu.com/webhelp/can-default_maxxecu_protocol.html): 1.2 / 1.3 fields and firmware requirements.
 - [ECUMaster EMU PRO manual](https://www.ecumaster.com/files/EMU_PRO/EMU_PRO_Manual.pdf), CAN stream table; [EMU Black V3 changes](https://www.ecumaster.com/files/EMU_BLACK_V3/changeLogV3.pdf), TPS correction.
@@ -191,17 +205,23 @@ MQTT subscriber. It stops its processes and removes its temporary configs on exi
 Tests cover scale/sign conversion, frame boundaries, both identifier widths,
 fragmented TCP input, stale frame rejection, serial command/reply forwarding,
 canonical MQTT envelopes, environment-prefix precedence, the shipped example
-configs and the terminal dashboard for every profile. Test vectors are derived
-from the published layouts,
-not captures from each physical ECU. Physical controller/adapter testing,
-firmware-specific availability and on-car comparison with the manufacturer's
-software are needed for all ECUs apart from Speeduino. Build using the provided spec sheets.
+configs and the terminal dashboard for every profile.
+
+The Speeduino profile is validated on a DIY-EFI CORE4 (firmware 2025.01) over
+USB: auto-detection, 50 Hz polling with 14 ms request-reply latency, and a
+captured packet in `tests/fixtures/speeduino-202501-130.bin` that the tests
+decode. Test vectors for the other profiles are derived from the published
+layouts, not captures from each physical ECU. Physical controller/adapter
+testing, firmware-specific availability and on-car comparison with the
+manufacturer's software are still needed for those.
 
 ## Speeduino scalar topics
 
-The Speeduino profile publishes every parameter as a short code under the
-configured base topic (for example `/ECU/RPM`) in addition to the canonical
-`/telemetry` envelope. Other profiles publish the canonical topic only.
+With the `legacy` format (on by default) the Speeduino profile publishes every
+parameter as a short code under the configured base topic (for example
+`/ECU/RPM`). A topic is sent when its value changes (at most
+`mqtt_max_rate_hz` times per second) and re-sent once per second. Topics are
+not retained. Other profiles publish no scalar topics.
 
 ### Engine basics
 | Code | Description |
@@ -235,7 +255,7 @@ configured base topic (for example `/ECU/RPM`) in addition to the canonical
 |---|---|
 | `VE1` / `VE2` / `VEC` | Volumetric efficiency current / table 1 / table 2 |
 | `PW1`–`PW4` | Injector pulse width channels 1–4 (ms, 1 dp) |
-| `PW5`–`PW8` | Channels 5–8 (138-byte firmware packets only) |
+| `PW5`–`PW8` | Channels 5–8 (only builds with 138-byte packets; not 2025.01) |
 | `FLD` | Fuel load |
 | `FTC` | Fuel temp correction |
 
@@ -244,7 +264,7 @@ configured base topic (for example `/ECU/RPM`) in addition to the canonical
 |---|---|
 | `ADV` / `AD1` / `AD2` | Ignition advance (degrees) |
 | `DWL` | Dwell time (ms, 1 dp) |
-| `SPK` | Spark status bitfield |
+| `SPK` | `status2` bitfield (byte 32; historic name, see below) |
 | `IGD` | Ignition load |
 
 ### Corrections
@@ -299,8 +319,25 @@ configured base topic (for example `/ECU/RPM`) in addition to the canonical
 | `RPD` | RPM dot |
 | `TOF` | Test output flags |
 | `NER` | Next error code |
-| `STA` / `ENG` / `ST3` / `ST4` | Status bitfields |
+| `STA` / `ENG` / `ST3` / `ST4` | `status1` / `engine` / `status3` / `status4` bitfields |
 | `EPS` | Engine protect status |
 | `OUT` | Output status |
 | `SDS` | SD card / TunerStudio status |
 | `EMP` | EMAP pressure (packets ≥ 121 bytes) |
+
+## Speeduino status bits
+
+Bit 0 first, from `globals.h` of firmware 202501.6. `/api/v1/live` and the web
+dashboard show every bit by name; the `json` state document lists the active
+ones as `group.name` (e.g. `"status2.sync"`).
+
+| Byte | Group | Bits 0–7 |
+|---|---|---|
+| 2 | `engine` | running, cranking, afterStartEnrich, warmupEnrich, tpsAccel, tpsDecel, mapAccel, mapDecel |
+| 1 | `status1` | inj1, inj2, inj3, inj4, dfco, boostCutFuel, toothLog1Ready, toothLog2Ready |
+| 32 | `status2` | hardLaunch, softLaunch, hardRevLimit, softRevLimit, boostCutSpark, sparkError, idleControl, sync |
+| 84 | `status3` | resetPrevent, nitrous, fuel2Active, vssRefresh, halfSync |
+| 110 | `status4` | wmiEmpty, vvt1Error, vvt2Error, fan, burnPending, stagingActive, commsCompat, allowLegacyComms |
+| 127 | `status5` | flatShiftHard, flatShiftSoft, spark2Active, knockActive, knockPulse, tsOnSecondary |
+| 85 | `engineProtect` | rpm, map, oil, afr, coolant |
+| 124 | `airCon` | request, compressor, rpmLockout, tpsLockout, turningOn, cltLockout, fan |

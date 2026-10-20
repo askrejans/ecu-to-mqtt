@@ -21,8 +21,9 @@
 //! └───────────────────────────────────────────────────────────┘
 //! ```
 
-use crate::ecu_data_parser::SpeeduinoData;
-use crate::ecu_protocol::{Channels, EcuProtocol};
+use crate::protocol::EcuProtocol;
+use crate::protocol::speeduino::SpeeduinoData;
+use crate::shared::{Counters, LinkStatus, Shared};
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyModifiers},
     execute,
@@ -43,7 +44,6 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::RwLock;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
@@ -60,41 +60,6 @@ const CHANNEL_STALE_AFTER: Duration = Duration::from_secs(2);
 pub struct ChannelSample {
     pub value: f64,
     pub updated: Instant,
-}
-
-/// Shared state updated from the ECU/MQTT tasks and rendered by the TUI.
-#[derive(Default)]
-pub struct TuiState {
-    pub ecu_connected: bool,
-    pub mqtt_connected: bool,
-    pub mqtt_enabled: bool,
-    pub protocol: EcuProtocol,
-    pub connection_address: String,
-    pub mqtt_address: String,
-    /// Full Speeduino parameter set (Speeduino profile only).
-    pub ecu_data: Option<SpeeduinoData>,
-    /// Canonical channels for every other profile.
-    pub channels: BTreeMap<String, ChannelSample>,
-    pub messages_published: u64,
-    pub frames_decoded: u64,
-}
-
-impl TuiState {
-    /// Merge one decoded packet. Channels a packet does not carry keep their
-    /// previous value and age, exactly like the partial MQTT envelopes.
-    pub fn update_channels(&mut self, channels: &Channels) {
-        let now = Instant::now();
-        for (name, value) in channels {
-            self.channels.insert(
-                name.clone(),
-                ChannelSample {
-                    value: *value,
-                    updated: now,
-                },
-            );
-        }
-        self.frames_decoded = self.frames_decoded.saturating_add(1);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -150,11 +115,16 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TuiWriter {
 /// Rendering happens every 100 ms; new ECU data and log entries are reflected
 /// on the next frame.
 pub async fn run_tui(
-    state: Arc<RwLock<TuiState>>,
+    state: Arc<Shared>,
     log_buffer: Arc<Mutex<VecDeque<String>>>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    // Set up terminal
+    // Always give the terminal back, even if a render panics.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default_hook(info);
+    }));
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -164,17 +134,14 @@ pub async fn run_tui(
 
     let result = tui_loop(&mut terminal, state, log_buffer, cancel).await;
 
-    // Restore terminal regardless of outcome
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    restore_terminal();
 
     result
 }
 
 async fn tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    state: Arc<RwLock<TuiState>>,
+    state: Arc<Shared>,
     log_buffer: Arc<Mutex<VecDeque<String>>>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -186,22 +153,7 @@ async fn tui_loop(
             _ = cancel.cancelled() => break,
 
             _ = render_tick.tick() => {
-                let s = state.read().await;
-                let logs: Vec<String> = log_buffer.lock().unwrap().iter().cloned().collect();
-                let snap = StateSnapshot {
-                    ecu_connected: s.ecu_connected,
-                    mqtt_connected: s.mqtt_connected,
-                    mqtt_enabled: s.mqtt_enabled,
-                    protocol: s.protocol,
-                    connection_address: s.connection_address.clone(),
-                    mqtt_address: s.mqtt_address.clone(),
-                    ecu_data: s.ecu_data.clone(),
-                    channels: s.channels.clone(),
-                    messages_published: s.messages_published,
-                    frames_decoded: s.frames_decoded,
-                    logs,
-                };
-                drop(s);
+                let snap = snapshot(&state, &log_buffer);
                 terminal.draw(|f| render(f, &snap))?;
             }
 
@@ -214,6 +166,51 @@ async fn tui_loop(
         }
     }
     Ok(())
+}
+
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+}
+
+fn snapshot(shared: &Shared, logs: &Mutex<VecDeque<String>>) -> StateSnapshot {
+    let logs: Vec<String> = logs
+        .lock()
+        .map(|l| l.iter().cloned().collect())
+        .unwrap_or_default();
+    let s = shared.read();
+    StateSnapshot {
+        ecu_connected: s.link == LinkStatus::Connected,
+        mqtt_connected: s.mqtt == LinkStatus::Connected,
+        mqtt_enabled: s.mqtt != LinkStatus::Disabled,
+        protocol: s.protocol,
+        connection_address: if s.link_detail.is_empty() {
+            shared.info.connection.clone()
+        } else {
+            s.link_detail.clone()
+        },
+        mqtt_address: shared.info.mqtt.clone().unwrap_or_default(),
+        ecu_data: s.speeduino.as_deref().cloned(),
+        channels: s
+            .channels
+            .iter()
+            .map(|(k, c)| {
+                (
+                    k.clone(),
+                    ChannelSample {
+                        value: c.value,
+                        updated: c.at,
+                    },
+                )
+            })
+            .collect(),
+        messages_published: Counters::get(&shared.counters.mqtt_published),
+        frames_decoded: Counters::get(&shared.counters.samples),
+        firmware: s.firmware.clone(),
+        sample_rate: s.sample_rate,
+        latency_ms: s.poll_latency_ms,
+        logs,
+    }
 }
 
 fn should_quit(event: &Event) -> bool {
@@ -241,6 +238,9 @@ struct StateSnapshot {
     channels: BTreeMap<String, ChannelSample>,
     messages_published: u64,
     frames_decoded: u64,
+    firmware: Option<String>,
+    sample_rate: f64,
+    latency_ms: Option<f64>,
     logs: Vec<String>,
 }
 
@@ -318,6 +318,22 @@ fn render_connections(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
         Span::styled("PROTO:", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(format!(" {}", snap.protocol.name())),
     ]));
+    if let Some(fw) = &snap.firmware {
+        lines.push(Line::from(Span::styled(
+            format!("  {fw}"),
+            Style::default().fg(Color::Gray),
+        )));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("RATE: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(format!("{:.0} Hz", snap.sample_rate)),
+        Span::styled(
+            snap.latency_ms
+                .map(|l| format!("  {l:.0} ms"))
+                .unwrap_or_default(),
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
     lines.push(Line::default());
 
     // ECU connection
@@ -356,7 +372,7 @@ fn render_connections(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
     }
 
     // Decoded packet count (profiles that feed the canonical channel panel)
-    if snap.protocol != EcuProtocol::Speeduino {
+    {
         lines.push(Line::from(vec![
             Span::styled("Pkts: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(snap.frames_decoded.to_string()),
@@ -756,7 +772,7 @@ fn render_ecu_data(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
     lines.push(row(vec![
         c("STS1", format!("{:#04x}", d.status1)),
         c("ENG", format!("{:#04x}", d.engine)),
-        c("SPRK", format!("{:#04x}", d.spark)),
+        c("ST2", format!("{:#04x}", d.status2)),
     ]));
     lines.push(row(vec![
         c("STS3", format!("{:#04x}", d.status3)),
@@ -979,16 +995,5 @@ mod tests {
             };
             assert!(text(&draw(&snap)).contains("Waiting for ECU data"));
         }
-    }
-
-    #[test]
-    fn partial_packets_merge_instead_of_replacing_the_channel_set() {
-        let mut state = TuiState::default();
-        state.update_channels(&Channels::from([("rpm".into(), 6000.)]));
-        state.update_channels(&Channels::from([("coolantC".into(), 90.)]));
-        state.update_channels(&Channels::from([("rpm".into(), 6100.)]));
-        assert_eq!(state.frames_decoded, 3);
-        assert_eq!(state.channels["rpm"].value, 6100.);
-        assert_eq!(state.channels["coolantC"].value, 90.);
     }
 }

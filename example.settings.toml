@@ -1,171 +1,156 @@
 # ========================================
-# ECU-to-MQTT Configuration File
+# ecu-to-mqtt configuration
 # ========================================
 #
-# All settings can be overridden with environment variables using the
-# ECU_TO_MQTT_ prefix.  A .env file in the working directory is also loaded
-# automatically.
-# Example: ECU_TO_MQTT_PORT_NAME=/dev/ttyUSB0 ECU_TO_MQTT_MQTT_HOST=broker.local
+# Every key is optional: with no file at all the gateway finds a Speeduino or
+# MegaSquirt on a USB serial port and publishes to an MQTT broker on localhost.
+#
+# Any key can be overridden with an ECU_TO_MQTT_<KEY> environment variable
+# (e.g. ECU_TO_MQTT_MQTT_HOST=broker.local). A .env file in the working
+# directory is loaded too. Check the result with:  ecu-to-mqtt --check-config
 
 # ========================================
-# Connection Type
+# Connection
 # ========================================
 
-# "serial"  – hardware serial port (default)
-# "tcp"     – raw TCP socket for WiFi bridges (ESP32, Moxa, USR-VIS410) or for
-#             the CAN gateway (scripts/can_gateway.py)
-# "can"     – native Linux SocketCAN interface, CAN profiles only
-# Env var:  ECU_TO_MQTT_CONNECTION_TYPE
+# "serial"    – USB / hardware serial port (default)
+# "tcp"       – raw TCP socket: WiFi/Ethernet serial bridge (ESP32, Moxa, USR)
+#               or, for a CAN profile, the CAN gateway (scripts/can_gateway.py)
+# "can"       – native Linux SocketCAN interface, CAN profiles only
+# "simulator" – built-in Speeduino engine model, no hardware needed
 connection_type = "serial"
 
-# ========================================
-# Serial Port Configuration
-# (only used when connection_type = "serial")
-# ========================================
+# Serial device ("/dev/ttyACM0", "/dev/ttyUSB0", "COM3") or "auto".
+# "auto" probes USB serial adapters with the read-only signature request and
+# uses the first one that answers. Built-in UARTs (ttyS*, Raspberry Pi GPIO
+# serial) are not probed; name them explicitly. List candidates with:
+#   ecu-to-mqtt --list-ports      (ranked)
+#   ecu-to-mqtt --probe           (asks each one for its signature)
+# Opening a port may reset an Arduino-based board; the gateway waits 2 s.
+port_name = "auto"
 
-# The serial device path (Linux/macOS) or COM port (Windows)
-# Examples: "/dev/ttyACM0", "/dev/ttyUSB0", "COM3"
-# Env var:  ECU_TO_MQTT_PORT_NAME
-port_name = "/dev/ttyACM0"
-
-# Baud rate.  Most Speeduino and MegaSquirt setups use 115200.
-# Env var:  ECU_TO_MQTT_BAUD_RATE
+# Most Speeduino and MegaSquirt setups use 115200.
 baud_rate = 115200
 
-# ========================================
-# TCP Connection Configuration
-# (only used when connection_type = "tcp")
-# ========================================
-
-# IP address or hostname of the WiFi/Ethernet–serial bridge
-# Env var:  ECU_TO_MQTT_TCP_HOST
 # tcp_host = "192.168.1.100"
+# tcp_port = 23              # CAN gateway (scripts/can_gateway.py): 29536
 
-# TCP port on the bridge device (commonly 23 or 8080).
-# For a CAN profile this is the CAN gateway; scripts/can_gateway.py uses 29536.
-# Env var:  ECU_TO_MQTT_TCP_PORT
-# tcp_port = 23
-
-# ========================================
-# CAN Interface Configuration
-# (only used when connection_type = "can", Linux only)
-# ========================================
-
-# SocketCAN interface name. Bring it up with the ECU's bitrate first:
+# SocketCAN interface. Bring it up with the ECU's bitrate first:
 #   sudo ip link set can0 up type can bitrate 500000
-# Env var:  ECU_TO_MQTT_CAN_INTERFACE
 # can_interface = "can0"
 
 # ========================================
-# ECU Protocol
+# ECU protocol
 # ========================================
 
-# Serial profiles:
-#   speeduino (default), ms2, ms3, ms3_pro, microsquirt
-# CAN profiles (need connection_type = "can" or a "tcp" CAN gateway):
-#   megasquirt_can_dash, megasquirt_can_realtime, haltech_can_v2,
-#   maxxecu_can_v12, maxxecu_can_v13, ecumaster_emu_can, aemnet_can,
-#   link_generic_dash, link_generic_dash2, motec_m1_pdm
-# See ECU_PROTOCOLS.md for exact compatibility and CAN gateway setup, and
-# examples/ for a ready-made config per profile.
-# Env var: ECU_TO_MQTT_ECU_PROTOCOL
-ecu_protocol = "speeduino"
+# "auto" (default) – identify a serial ECU from its signature
+# Serial: speeduino, ms2, ms3, ms3_pro, microsquirt
+# CAN:    megasquirt_can_dash, megasquirt_can_realtime, haltech_can_v2,
+#         maxxecu_can_v12, maxxecu_can_v13, ecumaster_emu_can, aemnet_can,
+#         link_generic_dash, link_generic_dash2, motec_m1_pdm
+# CAN profiles cannot be detected; set one explicitly. See ECU_PROTOCOLS.md
+# and examples/ for one ready-made config per profile.
+ecu_protocol = "auto"
 
-# Optional CAN base override, only for a CAN profile. TOML accepts hex.
-# The environment override ECU_TO_MQTT_CAN_BASE_ID uses decimal.
+# CAN base identifier override (TOML accepts hex; the env override is decimal).
 # can_base_id = 0x360
 
-# Speeduino-only expected data packet length in bytes.
-# Valid range: 119–256.  120 = standard packet, 121 = with EMAP sensor.
-# expected_data_length = 120
+# Speeduino realtime packet length the first poll asks for (119–256). The
+# gateway learns the real length from the first reply, so this rarely matters.
+# Firmware 2025.01 sends 130 bytes.
+# expected_data_length = 130
 
-# Serial/TCP read timeout in milliseconds
-# read_timeout_ms = 2000
-
-# ========================================
-# MQTT Broker Configuration
-# ========================================
-
-# Set to false to disable MQTT publishing entirely.
-# When false the application decodes and shows live data in the TUI only.
-# Env var:  ECU_TO_MQTT_MQTT_ENABLED
-mqtt_enabled = true
-
-# MQTT broker host address (IP or hostname)
-# Env var:  ECU_TO_MQTT_MQTT_HOST
-mqtt_host = "localhost"
-
-# MQTT broker port. Standard: 1883 (plain), 8883 (TLS/SSL)
-# Env var:  ECU_TO_MQTT_MQTT_PORT
-mqtt_port = 1883
-
-# Base MQTT topic prefix.  All topics are published under this prefix.
-# Default "/ECU/" → topics like "/ECU/telemetry" and "/ECU/RPM".
-# Use a per-car prefix when several cars share one broker.
-mqtt_base_topic = "/ECU/"
-
-# MQTT Quality of Service level
-# 0 = At most once (fire and forget) – DEFAULT
-# 1 = At least once (acknowledged delivery)
-# 2 = Exactly once (guaranteed single delivery)
-# mqtt_qos = 0
-
-# MQTT Client ID (auto-generated from PID if not set)
-# mqtt_client_id = "ecu-to-mqtt-12345"
-
-# ========================================
-# MQTT Authentication (Optional)
-# ========================================
-
-# Env vars:  ECU_TO_MQTT_MQTT_USERNAME / ECU_TO_MQTT_MQTT_PASSWORD
-# mqtt_username = "your_username"
-# mqtt_password = "your_password"
-
-# ========================================
-# MQTT TLS/SSL Configuration (Optional)
-# ========================================
-
-# Enable TLS/SSL encrypted connection to the broker
-# mqtt_use_tls = false
-
-# Path to CA certificate for server verification
-# mqtt_ca_cert_path = "/path/to/ca.crt"
-
-# Path to client certificate (mutual TLS)
-# mqtt_client_cert_path = "/path/to/client.crt"
-
-# Path to client private key (mutual TLS)
-# mqtt_client_key_path = "/path/to/client.key"
-
-# ========================================
-# Application Behaviour
-# ========================================
-
-# ECU data polling interval in milliseconds (1–10 000)
-# Lower values give more frequent updates at the cost of slightly higher CPU/network usage.
+# Poll interval in milliseconds. 20 ms = 50 Hz, which a USB Speeduino sustains.
 refresh_rate_ms = 20
 
-# Maximum number of reconnection attempts before the application exits
+# Reply timeout per poll (ms).
+# read_timeout_ms = 2000
+
+# Consecutive failed polls before the link is reopened.
 # max_retry_count = 10
 
-# Initial reconnection delay in milliseconds (exponential backoff base)
+# Reconnect backoff (ms): doubles from the initial delay up to the maximum.
 # initial_retry_delay_ms = 1000
-
-# Maximum reconnection delay in milliseconds
 # max_retry_delay_ms = 60000
 
-# MQTT message buffer size (queued messages while broker is unavailable)
+# ========================================
+# MQTT
+# ========================================
+
+# false = no broker; live data in the terminal and the web dashboard only.
+mqtt_enabled = true
+mqtt_host = "localhost"
+mqtt_port = 1883
+
+# Topic prefix. Use one prefix per car when several share a broker.
+# <base>/status is "online"/"offline" (retained, last will).
+mqtt_base_topic = "/ECU/"
+
+# What to publish (list, or a comma-separated string in the env override):
+#   canonical      <base>/telemetry  JSON envelope per sample, never retained
+#                  (the G86 app contract, see README)
+#   legacy         <base>/RPM, <base>/CLT … Speeduino scalars, on change + every 1 s
+#   json           <base>/state      full retained JSON document
+#   homeassistant  Home Assistant MQTT discovery for the main channels
+mqtt_formats = ["canonical", "legacy"]
+
+# Rate cap for legacy and json topics (Hz); 0 = every sample.
+# The canonical envelope is never throttled.
+# mqtt_max_rate_hz = 10
+
+# mqtt_homeassistant_prefix = "homeassistant"
+
+# 0 = at most once (default), 1 = at least once, 2 = exactly once
+# mqtt_qos = 0
+
+# Default: ecu-to-mqtt-<pid>
+# mqtt_client_id = "ecu-to-mqtt-car-1"
+
+# Requests queued while the broker is unreachable.
 # message_buffer_size = 1000
 
+# mqtt_username = "car-1"
+# mqtt_password = "secret"
+# mqtt_password_file = "/run/secrets/mqtt_password"   # wins over mqtt_password
+
+# TLS (port 8883). Without a CA path the built-in root store is used; client
+# certificates need a CA path.
+# mqtt_use_tls = false
+# mqtt_ca_cert_path = "/etc/ecu-to-mqtt/ca.crt"
+# mqtt_client_cert_path = "/etc/ecu-to-mqtt/client.crt"
+# mqtt_client_key_path = "/etc/ecu-to-mqtt/client.key"
+
 # ========================================
-# Logging Configuration
+# HTTP API and web dashboard
+# ========================================
+
+# Serves /health, /metrics (Prometheus), /api/v1/* (REST + SSE) and the
+# dashboard at /.
+# http_enabled = false
+# http_bind = "127.0.0.1"    # "0.0.0.0" to reach it from other devices
+# http_port = 9091
+
+# Bearer token for /api/*; the dashboard asks for it once and keeps it in the
+# browser. /health and /metrics stay open.
+# Set one whenever http_bind is not loopback.
+# http_token = "change-me"
+
+# Access-Control-Allow-Origin for a dashboard served from another origin.
+# http_cors_origin = "https://dash.example.com"
+
+# Set false to serve only the API.
+# http_ui = true
+
+# ========================================
+# Logging and capture
 # ========================================
 
 # trace | debug | info | warn | error
-# Env var:  ECU_TO_MQTT_LOG_LEVEL
 log_level = "info"
 
-# Enable JSON-formatted logs (useful for log aggregation / Grafana Loki)
+# JSON log lines (Loki, ELK).
 # log_json = false
-# Optional local canonical NDJSON archive; rotate/export before the 512 MiB cap.
+
+# Local canonical NDJSON archive (absolute path), written in synced batches.
+# Rotate or export it before it reaches the 512 MiB cap.
 # telemetry_log = "/var/lib/ecu-to-mqtt/telemetry.ndjson"

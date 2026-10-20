@@ -1,13 +1,19 @@
 //! Read-only ECU interoperability profiles. Sources and exact compatibility
 //! boundaries are recorded in ECU_PROTOCOLS.md.
-use crate::errors::{ParseError, Result};
+
+pub mod can_profiles;
+pub mod speeduino;
+
+use crate::errors::{DecodeError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EcuProtocol {
+    /// Serial only: identify the ECU from its signature (`Q` reply) on connect.
     #[default]
+    Auto,
     Speeduino,
     Ms2,
     Ms3,
@@ -47,6 +53,7 @@ impl EcuProtocol {
     /// The `ecu_protocol` configuration value for this profile.
     pub fn name(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Speeduino => "speeduino",
             Self::Ms2 => "ms2",
             Self::Ms3 => "ms3",
@@ -68,6 +75,7 @@ impl EcuProtocol {
     /// Manufacturer-facing description used in the terminal dashboard header.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Auto => "Auto-detect (serial)",
             Self::Speeduino => "Speeduino primary 'A'",
             Self::Ms2 => "MegaSquirt MS2/Extra",
             Self::Ms3 => "MegaSquirt MS3",
@@ -89,7 +97,7 @@ impl EcuProtocol {
     pub fn is_can(self) -> bool {
         !matches!(
             self,
-            Self::Speeduino | Self::Ms2 | Self::Ms3 | Self::Ms3Pro | Self::Microsquirt
+            Self::Auto | Self::Speeduino | Self::Ms2 | Self::Ms3 | Self::Ms3Pro | Self::Microsquirt
         )
     }
     pub fn extended(self) -> bool {
@@ -120,16 +128,43 @@ impl EcuProtocol {
             _ => 63,
         }
     }
+    /// Realtime read command. Read-only on every supported firmware.
     pub fn command(self) -> &'static [u8] {
-        if self == Self::Speeduino {
-            b"A"
+        match self {
+            Self::Speeduino | Self::Auto => b"A",
+            _ => b"a\0\x06",
+        }
+    }
+
+    /// True for the MegaSquirt serial family (112-byte compatibility reply).
+    pub fn is_megasquirt_serial(self) -> bool {
+        matches!(
+            self,
+            Self::Ms2 | Self::Ms3 | Self::Ms3Pro | Self::Microsquirt
+        )
+    }
+
+    /// Identify a serial ECU from its `Q` signature reply.
+    ///
+    /// Speeduino answers `speeduino 202501`; MegaSquirt firmware answers e.g.
+    /// `MS2Extra comms342hP`, `MS3 Format 0566.05`, `MS3 Pro …` or `MSII …`.
+    pub fn from_signature(signature: &str) -> Option<Self> {
+        let s = signature.trim().to_ascii_lowercase();
+        if s.starts_with("speeduino") {
+            Some(Self::Speeduino)
+        } else if s.contains("ms3 pro") || s.contains("ms3pro") {
+            Some(Self::Ms3Pro)
+        } else if s.starts_with("ms3") {
+            Some(Self::Ms3)
+        } else if s.starts_with("ms2extra") || s.starts_with("msii") || s.starts_with("ms2") {
+            Some(Self::Ms2)
         } else {
-            b"a\0\x06"
+            None
         }
     }
     pub fn source(self) -> &'static str {
         match self {
-            Self::Speeduino => "speeduino-primary-a",
+            Self::Auto | Self::Speeduino => "speeduino-primary-a",
             Self::Ms2 => "ms2-compat112",
             Self::Ms3 => "ms3-compat112",
             Self::Ms3Pro => "ms3pro-compat112",
@@ -148,12 +183,8 @@ impl EcuProtocol {
     }
 }
 pub type Channels = BTreeMap<String, f64>;
-pub(super) fn invalid(message: &str) -> crate::errors::AppError {
-    ParseError::InvalidData {
-        offset: 0,
-        message: message.to_owned(),
-    }
-    .into()
+pub(super) fn invalid(message: &str) -> DecodeError {
+    DecodeError::Invalid(message.to_owned())
 }
 pub(super) fn signed(data: &[u8], offset: usize) -> f64 {
     i16::from_be_bytes([data[offset], data[offset + 1]]) as f64
@@ -181,12 +212,21 @@ pub(super) fn add(channels: &mut Channels, name: &str, value: f64) {
         "brakePressureKpa" => (0., 20000.),
         "oilC" | "fuelC" | "transmissionC" | "differentialC" => (-50., 250.),
         "gear" => (-1., 12.),
+        // Extended channels (ignored by consumers that do not know them).
+        "baroKpa" => (50., 120.),
+        "afrTarget" => (5., 30.),
+        "veCurrent" => (0., 255.),
+        "injectorPwMs" => (0., 100.),
+        "dwellMs" => (0., 50.),
+        "syncLossCount" => (0., 255.),
         "brakeSwitch" | "clutchSwitch" => (0., 1.),
         "lateralG" | "longitudinalG" => (-10., 10.),
         _ => return,
     };
     if value.is_finite() && value >= low && value <= high {
-        channels.insert(name.to_owned(), value);
+        // Three decimals exceed every source's resolution and drop f32
+        // widening noise (14.7 instead of 14.699999809265137).
+        channels.insert(name.to_owned(), (value * 1000.0).round() / 1000.0);
     }
 }
 
@@ -240,7 +280,7 @@ pub fn decode_can(protocol: EcuProtocol, base: u32, frame: &CanInputFrame) -> Re
         protocol,
         EcuProtocol::MegasquirtCanDash | EcuProtocol::MegasquirtCanRealtime
     ) {
-        return crate::can_profiles::decode(protocol, base, frame);
+        return can_profiles::decode(protocol, base, frame);
     }
     let mut out = Channels::new();
     let Some(group) = frame.id.checked_sub(base) else {
@@ -281,6 +321,15 @@ pub fn decode_can(protocol: EcuProtocol, base: u32, frame: &CanInputFrame) -> Re
 mod tests {
     use super::*;
     #[test]
+    fn channel_values_carry_no_f32_widening_noise() {
+        let mut c = Channels::new();
+        add(&mut c, "afrTarget", f64::from(14.7f32));
+        add(&mut c, "batteryV", f64::from(13.9f32));
+        assert_eq!(c["afrTarget"], 14.7);
+        assert_eq!(c["batteryV"], 13.9);
+    }
+
+    #[test]
     fn profile_names_match_the_accepted_configuration_values() {
         for protocol in EcuProtocol::ALL {
             let value = serde_json::to_string(&protocol).unwrap();
@@ -292,6 +341,25 @@ mod tests {
             assert!(!protocol.label().is_empty());
         }
     }
+    #[test]
+    fn signatures_identify_serial_ecus() {
+        for (sig, protocol) in [
+            ("speeduino 202501", EcuProtocol::Speeduino),
+            ("MS2Extra comms342hP", EcuProtocol::Ms2),
+            ("MS3 Format 0566.05", EcuProtocol::Ms3),
+            ("MS3 Pro 1.5.1", EcuProtocol::Ms3Pro),
+            ("MSII Rev 3.83", EcuProtocol::Ms2),
+        ] {
+            assert_eq!(EcuProtocol::from_signature(sig), Some(protocol), "{sig}");
+        }
+        assert_eq!(EcuProtocol::from_signature("$GPRMC"), None);
+        assert!(!EcuProtocol::ALL.contains(&EcuProtocol::Auto));
+        assert_eq!(
+            serde_json::from_str::<EcuProtocol>("\"auto\"").unwrap(),
+            EcuProtocol::Auto
+        );
+    }
+
     #[test]
     fn all_serial_profiles_use_only_the_documented_read_command() {
         for protocol in [

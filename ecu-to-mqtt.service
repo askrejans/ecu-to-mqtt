@@ -11,11 +11,11 @@ Type=simple
 User=ecu-to-mqtt
 Group=ecu-to-mqtt
 
-# Path to the binary
-ExecStart=/usr/bin/ecu-to-mqtt --config /etc/ecu-to-mqtt/settings.toml
+# --headless: log to the journal, no terminal dashboard
+ExecStart=/usr/bin/ecu-to-mqtt --headless --config /etc/ecu-to-mqtt/settings.toml
 
 # Optional canonical telemetry archive stays in the service state directory
-WorkingDirectory=/tmp
+WorkingDirectory=/var/lib/ecu-to-mqtt
 StateDirectory=ecu-to-mqtt
 StateDirectoryMode=0700
 UMask=0077
@@ -65,6 +65,7 @@ SyslogIdentifier=ecu-to-mqtt
 # Environment variables (optional - can also use settings.toml)
 # Environment="ECU_TO_MQTT_LOG_LEVEL=info"
 # Environment="ECU_TO_MQTT_MQTT_HOST=mqtt.local"
+# Environment="ECU_TO_MQTT_HTTP_ENABLED=true"
 
 [Install]
 WantedBy=multi-user.target

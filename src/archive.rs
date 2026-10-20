@@ -1,56 +1,84 @@
 //! Optional local evidence archive. MQTT outages do not determine retention.
+use crate::shared::{Counters, Shared};
 use std::io;
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicU64, Ordering},
-};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::mpsc};
 
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
+const QUEUE: usize = 4096;
 
-async fn append(path: &str, packet: &str) -> io::Result<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().await;
+/// Most packets written per `fdatasync`.
+const MAX_BATCH: usize = 256;
+
+/// Append lines and `fdatasync` once. The path is reopened for every batch so
+/// rename-based rotation takes effect immediately.
+async fn append_batch(path: &str, packets: &[Arc<str>]) -> io::Result<()> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
     options.mode(0o600);
     let mut file = options.open(path).await?;
-    if file.metadata().await?.len() + packet.len() as u64 + 1 > MAX_BYTES {
+    let mut lines = Vec::with_capacity(packets.iter().map(|p| p.len() + 1).sum());
+    for packet in packets {
+        lines.extend_from_slice(packet.as_bytes());
+        lines.push(b'\n');
+    }
+    if file.metadata().await?.len() + lines.len() as u64 > MAX_BYTES {
         return Err(io::Error::other(
             "telemetry archive reached 512 MiB; rotate or export it",
         ));
     }
-    file.write_all(format!("{packet}\n").as_bytes()).await?;
+    file.write_all(&lines).await?;
     file.sync_data().await
 }
 
-pub async fn record(path: Option<&str>, packet: &str) {
-    let Some(path) = path else {
-        return;
-    };
-    if let Err(error) = append(path, packet).await {
-        // Storage failure must not fill the service journal at sensor frequency.
-        static LAST_WARNING: AtomicU64 = AtomicU64::new(0);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let last = LAST_WARNING.load(Ordering::Relaxed);
-        if now.saturating_sub(last) >= 60
-            && LAST_WARNING
-                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
-            tracing::error!(%error, "Local telemetry archive unavailable; live capture continues without archiving");
+/// Spawn the archive writer. Packets are written in order on a dedicated task,
+/// so a slow disk or `fsync` never stalls acquisition. If the queue is full
+/// the packet is counted as an archive error and dropped (logged, rate-limited).
+pub fn spawn(path: String, shared: Arc<Shared>) -> mpsc::Sender<Arc<str>> {
+    let (tx, mut rx) = mpsc::channel::<Arc<str>>(QUEUE);
+    tokio::spawn(async move {
+        let mut last_warning: Option<Instant> = None;
+        let mut batch = Vec::with_capacity(MAX_BATCH);
+        while let Some(packet) = rx.recv().await {
+            batch.push(packet);
+            // Everything already queued shares one write and one sync.
+            while batch.len() < MAX_BATCH {
+                match rx.try_recv() {
+                    Ok(p) => batch.push(p),
+                    Err(_) => break,
+                }
+            }
+            if let Err(error) = append_batch(&path, &batch).await {
+                Counters::add(&shared.counters.archive_errors, batch.len() as u64);
+                warn_rate_limited(&mut last_warning, &error);
+            }
+            batch.clear();
         }
+    });
+    tx
+}
+
+/// Storage failure must not fill the service journal at sensor frequency.
+fn warn_rate_limited(last: &mut Option<Instant>, error: &dyn std::fmt::Display) {
+    if last.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+        *last = Some(Instant::now());
+        tracing::error!(%error, "Local telemetry archive unavailable; live capture continues without archiving");
+    }
+}
+
+/// Queue a packet; never blocks.
+pub fn record(tx: &mpsc::Sender<Arc<str>>, shared: &Shared, packet: Arc<str>) {
+    if tx.try_send(packet).is_err() {
+        Counters::inc(&shared.counters.archive_errors);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
     #[tokio::test]
     async fn archive_preserves_packets_across_rotation_and_enforces_cap() {
         let directory = std::env::temp_dir().join(format!(
@@ -64,11 +92,20 @@ mod tests {
         tokio::fs::create_dir(&directory).await.unwrap();
         let path = directory.join("telemetry.ndjson");
         let name = path.to_str().unwrap();
-        append(name, r#"{"sequence":1}"#).await.unwrap();
-        append(name, r#"{"sequence":2}"#).await.unwrap();
+        append_batch(
+            name,
+            &[
+                Arc::from(r#"{"sequence":1}"#),
+                Arc::from(r#"{"sequence":2}"#),
+            ],
+        )
+        .await
+        .unwrap();
         let saved = directory.join("telemetry.ndjson.1");
         tokio::fs::rename(&path, &saved).await.unwrap();
-        append(name, r#"{"sequence":3}"#).await.unwrap();
+        append_batch(name, &[Arc::from(r#"{"sequence":3}"#)])
+            .await
+            .unwrap();
         assert_eq!(
             tokio::fs::read_to_string(&saved)
                 .await
@@ -83,7 +120,7 @@ mod tests {
         );
         let file = OpenOptions::new().write(true).open(&path).await.unwrap();
         file.set_len(MAX_BYTES).await.unwrap();
-        assert!(append(name, "{}").await.is_err());
+        assert!(append_batch(name, &[Arc::from("{}")]).await.is_err());
         drop(file);
         tokio::fs::remove_dir_all(directory).await.unwrap();
     }

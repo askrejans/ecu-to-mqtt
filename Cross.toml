@@ -1,16 +1,5 @@
 # Cross.toml – configuration for `cross` (https://github.com/cross-rs/cross)
 #
-# paho-mqtt-sys compiles the Paho C library via cmake inside the Docker container.
-# The mingw-w64 GCC 7.3.0 toolchain in the cross 0.2.5 image needs _WIN32_WINNT=0x0600
-# so winsock2.h defines struct pollfd / WSAPoll.
-#
-# paho.mqtt.c's CMakeLists links "User32" (capital U); Linux's ld is case-sensitive
-# and only has libuser32.a.  The pre-build step creates the symlink inside the container.
-
-[target.x86_64-pc-windows-gnu]
-pre-build = [
-    "ln -sf /usr/x86_64-w64-mingw32/lib/libuser32.a /usr/x86_64-w64-mingw32/lib/libUser32.a",
-]
-
-[target.x86_64-pc-windows-gnu.env]
-passthrough = ["CFLAGS_x86_64_pc_windows_gnu"]
+# The build is pure Rust apart from aws-lc-sys (rustls crypto provider), which
+# the stock cross images compile without extra packages. Serial ports are
+# enumerated through sysfs, so no libudev is needed in the containers.

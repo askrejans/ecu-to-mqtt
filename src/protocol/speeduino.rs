@@ -1,43 +1,18 @@
-//! Speeduino ECU data parser.
+//! Speeduino primary-serial `A` realtime packet.
 //!
-//! Implements the Speeduino 'A' command realtime-data protocol.
+//! Byte layout from `getTSLogEntry()` in `speeduino/logger.cpp`. Firmware
+//! 2025.01 (`speeduino 202501`) sends **130 bytes** (cases 0–129); some older
+//! or modified builds append PW5–PW8 for 138 bytes, which are decoded when present.
+//! The secondary-serial `A` reply (75 bytes) has a different layout and is rejected.
 //!
-//! **Wire format**: primary-serial 'A' command — byte layout from `getTSLogEntry()` in
-//! <https://github.com/speeduino/speeduino/blob/master/speeduino/logger.cpp>.
-//!
-//! | Packet size | Source |
-//! |-------------|--------|
-//! | 138 bytes   | Real Speeduino ECU (current firmware, `LOG_ENTRY_SIZE = 138`) |
-//! | 130 bytes   | speeduino-serial-sim (identical layout, missing PW5–PW8 at bytes 130–137) |
-//!
-//! **Note**: the secondary-serial 'A' command (75 bytes) uses an incompatible byte layout
-//! and is NOT supported here. Connect via the primary serial interface (USB or TCP/WiFi bridge).
-//!
-//! All multi-byte values in the Speeduino protocol are **little-endian** (low byte first).
-//! Temperatures are stored with a +40 offset to fit in an unsigned byte; call the
-//! helper methods (e.g. [`SpeeduinoData::iat_celsius()`]) to get the real value.
+//! All multi-byte values are little-endian. Temperatures carry a +40 offset.
 
-use crate::config::AppConfig;
-use crate::errors::{ParseError, Result};
-use crate::mqtt_handler::{MqttMessage, build_topic_path};
-use std::sync::{
-    Arc, OnceLock,
-    atomic::{AtomicU64, Ordering},
-};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use super::{Channels, add};
+use crate::errors::{DecodeError, Result};
+use serde::Serialize;
 
-// ---------------------------------------------------------------------------
-// Validation constants
-// ---------------------------------------------------------------------------
-const RPM_MAX: u16 = 15_000;
-const TEMP_MIN: i16 = -40;
-const TEMP_MAX: i16 = 200;
-const MAP_MAX: u16 = 400; // kPa
-const TPS_MAX: u8 = 100; // %
-const BATTERY_MIN: f32 = 8.0; // V
-const BATTERY_MAX: f32 = 18.0; // V
+/// Bytes in a 2025.01 primary-serial `A` packet.
+pub const PACKET_LEN: usize = 130;
 
 // ---------------------------------------------------------------------------
 // Data structure
@@ -47,7 +22,7 @@ const BATTERY_MAX: f32 = 18.0; // V
 ///
 /// Field names, byte offsets, and units follow the wiki protocol specification.
 /// Multi-byte values are pre-combined and stored in their natural Rust types.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SpeeduinoData {
     /// Byte 0 – seconds counter (resets to 0 on ECU reset)
     pub secl: u8,
@@ -106,8 +81,8 @@ pub struct SpeeduinoData {
     pub boost_target_raw: u8,
     /// Byte 31 – boost solenoid duty (stored / 100; × 100 for actual %)
     pub boost_duty_raw: u8,
-    /// Byte 32 – spark status bitfield
-    pub spark: u8,
+    /// Byte 32 – `status2` bitfield (launch, rev limiters, boost cut, sync)
+    pub status2: u8,
 
     /// Bytes 33–34 – RPM rate of change (little-endian i16)
     pub rpm_dot: i16,
@@ -227,7 +202,7 @@ pub struct SpeeduinoData {
     /// Byte 129 – knock retard (degrees)
     pub knock_retard: Option<u8>,
 
-    // ---- PW5–PW8 (bytes 130–137): current firmware only (138-byte packets) ----
+    // ---- PW5–PW8 (bytes 130–137): only in 138-byte packets of other builds ----
     /// Bytes 130–131 – injector pulse width 5 (µs / 10, little-endian u16)
     pub pw5: Option<u16>,
     /// Bytes 132–133 – injector pulse width 6
@@ -281,76 +256,20 @@ impl SpeeduinoData {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Parse raw bytes into [`SpeeduinoData`] without publishing to MQTT.
-#[allow(dead_code)]
-pub fn get_parsed_data(data: &[u8]) -> Result<SpeeduinoData> {
-    parse_realtime_data(data)
-}
-
-/// Parse ECU data and optionally publish all parameters to MQTT.
-///
-/// When `mqtt_sender` is `None` (MQTT disabled), parsing and optional local archiving continue – no
-/// network I/O takes place.  Returns the parsed struct so callers (e.g. the
-/// TUI) can display it.
-pub async fn process_speeduino_realtime_data(
-    data: &[u8],
-    config: &Arc<AppConfig>,
-    mqtt_sender: Option<&mpsc::Sender<MqttMessage>>,
-) -> Result<SpeeduinoData> {
-    // Minimum for primary-serial packets (both sim=130 and real firmware=138).
-    // Secondary-serial 'A' (75 bytes) uses an incompatible layout — not supported.
-    const MIN_BYTES: usize = 130;
-
-    if data.len() < MIN_BYTES {
-        warn!(
-            "Packet too short: expected ≥{} bytes, got {}. \
-             Ensure you are connected to the primary serial interface (USB/TCP bridge). \
-             The secondary-serial 'A' response (75 bytes) uses an incompatible layout.",
-            MIN_BYTES,
-            data.len()
-        );
-        return Err(ParseError::InsufficientData {
-            expected: MIN_BYTES,
-            actual: data.len(),
-        }
-        .into());
-    }
-
-    let fmt = if data.len() >= 138 {
-        "real-firmware/138"
-    } else {
-        "sim/130"
-    };
-    debug!(
-        "Parsing {} bytes of ECU realtime data ({})",
-        data.len(),
-        fmt
-    );
-    let ecu_data = parse_realtime_data(data)?;
-
-    publish_speeduino_params_to_mqtt(mqtt_sender, config, &ecu_data).await?;
-
-    Ok(ecu_data)
-}
-
-// ---------------------------------------------------------------------------
 // Internal parser
 // ---------------------------------------------------------------------------
 
-fn parse_realtime_data(data: &[u8]) -> Result<SpeeduinoData> {
+/// Parse a primary-serial `A` packet (≥ 130 bytes).
+pub fn parse(data: &[u8]) -> Result<SpeeduinoData> {
     // Byte layout matches `getTSLogEntry()` in Speeduino logger.cpp.
-    // Minimum: 130 bytes (speeduino-serial-sim) or 138 bytes (current firmware).
+    // Minimum 130 bytes (firmware 2025.01); longer packets are accepted.
     // The secondary-serial 'A' response (75 bytes) uses a different, incompatible layout.
     const MIN_BYTES: usize = 130;
     if data.len() < MIN_BYTES {
-        return Err(ParseError::InsufficientData {
+        return Err(DecodeError::Short {
             expected: MIN_BYTES,
             actual: data.len(),
-        }
-        .into());
+        });
     }
 
     // Inline helpers for little-endian multi-byte reads.
@@ -364,7 +283,7 @@ fn parse_realtime_data(data: &[u8]) -> Result<SpeeduinoData> {
     }
 
     // Optional fields — all present in 130-byte packets.
-    // PW5–PW8 (bytes 130–137) require the full 138-byte current-firmware packet.
+    // PW5–PW8 (bytes 130–137) need a 138-byte packet.
     let emap = if data.len() >= 123 {
         Some(u16_le(121, 122))
     } else {
@@ -451,7 +370,7 @@ fn parse_realtime_data(data: &[u8]) -> Result<SpeeduinoData> {
         free_ram: u16_le(28, 29),
         boost_target_raw: data[30],
         boost_duty_raw: data[31],
-        spark: data[32],
+        status2: data[32],
         rpm_dot: i16_le(33, 34),
         ethanol_pct: data[35],
         flex_correction: data[36],
@@ -513,37 +432,11 @@ fn parse_realtime_data(data: &[u8]) -> Result<SpeeduinoData> {
         pw8,
     };
 
-    validate_data(&parsed);
     Ok(parsed)
 }
 
-/// Log warnings for out-of-range values.  Never fails parsing.
-fn validate_data(d: &SpeeduinoData) {
-    if d.rpm > RPM_MAX {
-        warn!("RPM out of range: {} (max {})", d.rpm, RPM_MAX);
-    }
-    let coolant_c = d.coolant_celsius();
-    if !(TEMP_MIN..=TEMP_MAX).contains(&coolant_c) {
-        warn!("Coolant temp out of range: {}°C", coolant_c);
-    }
-    let iat_c = d.iat_celsius();
-    if !(TEMP_MIN..=TEMP_MAX).contains(&iat_c) {
-        warn!("IAT out of range: {}°C", iat_c);
-    }
-    if d.map > MAP_MAX {
-        warn!("MAP out of range: {} kPa (max {})", d.map, MAP_MAX);
-    }
-    if d.tps > TPS_MAX {
-        warn!("TPS out of range: {}% (max {})", d.tps, TPS_MAX);
-    }
-    let batt = d.battery_voltage();
-    if batt > 0.0 && !(BATTERY_MIN..=BATTERY_MAX).contains(&batt) {
-        warn!("Battery voltage out of range: {:.1} V", batt);
-    }
-}
-
 // ---------------------------------------------------------------------------
-// MQTT publishing
+// Legacy scalar topics
 // ---------------------------------------------------------------------------
 
 /// Build the full list of (topic-code, value) pairs for publishing.
@@ -581,7 +474,8 @@ pub fn get_params_to_publish(d: &SpeeduinoData) -> Vec<(&'static str, String)> {
         ("AD1", d.advance1.to_string()),
         ("AD2", d.advance2.to_string()),
         ("DWL", format!("{:.1}", d.dwell_ms())),
-        ("SPK", d.spark.to_string()),
+        // Legacy topic name kept; the byte is status2, not spark flags.
+        ("SPK", d.status2.to_string()),
         // Corrections
         ("BTC", d.bat_correction.to_string()),
         ("EGC", d.ego_correction.to_string()),
@@ -682,7 +576,7 @@ pub fn get_params_to_publish(d: &SpeeduinoData) -> Vec<(&'static str, String)> {
     if let Some(v) = d.knock_retard {
         params.push(("KNR", v.to_string()));
     }
-    // PW5–PW8 — current firmware only (138-byte packets)
+    // PW5–PW8 — 138-byte packets only
     if let Some(v) = d.pw5 {
         params.push(("PW5", format!("{:.1}", v as f32 / 10.0)));
     }
@@ -699,81 +593,218 @@ pub fn get_params_to_publish(d: &SpeeduinoData) -> Vec<(&'static str, String)> {
     params
 }
 
-/// One atomic sample with normalized units. Receivers can reject replayed,
-/// buffered or out-of-order frames instead of joining unrelated scalar topics.
-fn telemetry_frame(d: &SpeeduinoData, timestamp_ms: u64, boot_id: &str, sequence: u64) -> String {
-    let mut channels = serde_json::json!({
-        "rpm": d.rpm, "throttle": d.tps, "manifoldKpa": d.map,
-        "batteryV": d.battery_voltage(), "coolantC": d.coolant_celsius(),
-        "intakeC": d.iat_celsius(), "ignitionDeg": d.advance,
-    });
-    // An absent/unconfigured wideband reports zero, not a measured AFR of zero.
+// ---------------------------------------------------------------------------
+// Canonical channels
+// ---------------------------------------------------------------------------
+
+/// Canonical channels for the `telemetry` envelope (G86 contract names).
+///
+/// Every channel is range-checked by [`add`]; an absent or unconfigured sensor
+/// is omitted rather than reported as zero.
+pub fn canonical(d: &SpeeduinoData) -> Channels {
+    let mut c = Channels::new();
+    add(&mut c, "rpm", f64::from(d.rpm));
+    add(&mut c, "throttle", f64::from(d.tps));
+    add(&mut c, "manifoldKpa", f64::from(d.map));
+    add(&mut c, "batteryV", f64::from(d.battery_voltage()));
+    add(&mut c, "coolantC", f64::from(d.coolant_celsius()));
+    add(&mut c, "intakeC", f64::from(d.iat_celsius()));
+    add(&mut c, "ignitionDeg", f64::from(d.advance));
+    // An absent wideband reads zero, not a measured AFR of zero.
     if (50..=250).contains(&d.o2_primary) {
-        channels["afr"] = serde_json::json!(d.o2_primary as f32 / 10.0);
+        add(&mut c, "afr", f64::from(d.o2_primary) / 10.0);
     }
-    serde_json::json!({
-        "schema": 1, "source": "speeduino-primary-a",
-        "timestampMs": timestamp_ms, "bootId": boot_id, "sequence": sequence,
-        "channels": channels,
-    })
-    .to_string()
+    // Barometer is only meaningful when the ECU reports a plausible value.
+    if (50..=120).contains(&d.baro) {
+        add(&mut c, "baroKpa", f64::from(d.baro));
+        add(&mut c, "boostKpa", f64::from(d.map) - f64::from(d.baro));
+    }
+    if d.afr_target > 0 {
+        add(&mut c, "afrTarget", f64::from(d.afr_target_real()));
+    }
+    add(&mut c, "veCurrent", f64::from(d.ve_current));
+    add(&mut c, "injectorPwMs", f64::from(d.pw1_ms()));
+    add(&mut c, "dwellMs", f64::from(d.dwell_ms()));
+    add(&mut c, "syncLossCount", f64::from(d.sync_loss_counter));
+    c
 }
 
-async fn publish_speeduino_params_to_mqtt(
-    mqtt_sender: Option<&mpsc::Sender<MqttMessage>>,
-    config: &Arc<AppConfig>,
-    d: &SpeeduinoData,
-) -> Result<()> {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    static BOOT_ID: OnceLock<String> = OnceLock::new();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| ParseError::InvalidData {
-            offset: 0,
-            message: format!("System clock precedes Unix epoch: {error}"),
-        })?;
-    let boot = BOOT_ID.get_or_init(|| format!("{}-{}", std::process::id(), now.as_nanos()));
-    let snapshot = telemetry_frame(
-        d,
-        now.as_millis() as u64,
-        boot,
-        SEQUENCE.fetch_add(1, Ordering::Relaxed),
-    );
-    crate::archive::record(config.telemetry_log.as_deref(), &snapshot).await;
-    let Some(mqtt_sender) = mqtt_sender else {
-        return Ok(());
-    };
-    match mqtt_sender.try_send(MqttMessage::new(
-        build_topic_path(&config.mqtt_base_topic, "telemetry"),
-        snapshot,
-        config.mqtt_qos,
-    )) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(_)) => return Ok(()),
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            return Err(ParseError::InvalidData {
-                offset: 0,
-                message: "MQTT frame queue closed".to_string(),
-            }
-            .into());
-        }
+// ---------------------------------------------------------------------------
+// Status flags (speeduino/globals.h, firmware 202501.6)
+// ---------------------------------------------------------------------------
+
+/// One decoded status bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Flag {
+    pub group: &'static str,
+    pub name: &'static str,
+    pub on: bool,
+}
+
+const ENGINE: [&str; 8] = [
+    "running",
+    "cranking",
+    "afterStartEnrich",
+    "warmupEnrich",
+    "tpsAccel",
+    "tpsDecel",
+    "mapAccel",
+    "mapDecel",
+];
+const STATUS1: [&str; 8] = [
+    "inj1",
+    "inj2",
+    "inj3",
+    "inj4",
+    "dfco",
+    "boostCutFuel",
+    "toothLog1Ready",
+    "toothLog2Ready",
+];
+const STATUS2: [&str; 8] = [
+    "hardLaunch",
+    "softLaunch",
+    "hardRevLimit",
+    "softRevLimit",
+    "boostCutSpark",
+    "sparkError",
+    "idleControl",
+    "sync",
+];
+const STATUS3: [&str; 5] = [
+    "resetPrevent",
+    "nitrous",
+    "fuel2Active",
+    "vssRefresh",
+    "halfSync",
+];
+const STATUS4: [&str; 8] = [
+    "wmiEmpty",
+    "vvt1Error",
+    "vvt2Error",
+    "fan",
+    "burnPending",
+    "stagingActive",
+    "commsCompat",
+    "allowLegacyComms",
+];
+const STATUS5: [&str; 6] = [
+    "flatShiftHard",
+    "flatShiftSoft",
+    "spark2Active",
+    "knockActive",
+    "knockPulse",
+    "tsOnSecondary",
+];
+const PROTECT: [&str; 5] = ["rpm", "map", "oil", "afr", "coolant"];
+const AIRCON: [&str; 7] = [
+    "request",
+    "compressor",
+    "rpmLockout",
+    "tpsLockout",
+    "turningOn",
+    "cltLockout",
+    "fan",
+];
+
+fn bits(out: &mut Vec<Flag>, group: &'static str, names: &[&'static str], value: u8) {
+    for (bit, name) in names.iter().enumerate() {
+        out.push(Flag {
+            group,
+            name,
+            on: value & (1 << bit) != 0,
+        });
     }
-    for (code, value) in get_params_to_publish(d) {
-        let topic = build_topic_path(&config.mqtt_base_topic, code);
-        let msg = MqttMessage::new(topic, value, config.mqtt_qos);
-        match mqtt_sender.try_send(msg) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => break,
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                return Err(ParseError::InvalidData {
-                    offset: 0,
-                    message: "Failed to queue MQTT message (channel closed)".to_string(),
-                }
-                .into());
-            }
-        }
+}
+
+/// Decode every documented status bit of a packet.
+pub fn flags(d: &SpeeduinoData) -> Vec<Flag> {
+    let mut out = Vec::with_capacity(64);
+    bits(&mut out, "engine", &ENGINE, d.engine);
+    bits(&mut out, "status1", &STATUS1, d.status1);
+    bits(&mut out, "status2", &STATUS2, d.status2);
+    bits(&mut out, "status3", &STATUS3, d.status3);
+    bits(&mut out, "status4", &STATUS4, d.status4);
+    if let Some(v) = d.status5 {
+        bits(&mut out, "status5", &STATUS5, v);
     }
-    Ok(())
+    bits(&mut out, "engineProtect", &PROTECT, d.engine_protect_status);
+    if let Some(v) = d.air_con_status {
+        bits(&mut out, "airCon", &AIRCON, v);
+    }
+    out
+}
+
+/// Squirts per cycle from `status3` bits 5–7.
+pub fn squirts_per_cycle(d: &SpeeduinoData) -> u8 {
+    d.status3 >> 5
+}
+
+// ---------------------------------------------------------------------------
+// Encoder (simulator and tests)
+// ---------------------------------------------------------------------------
+
+/// Values the simulator controls; everything else is zero.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SimValues {
+    pub secl: u8,
+    pub engine: u8,
+    pub status2: u8,
+    pub map_kpa: u16,
+    pub iat_c: i16,
+    pub coolant_c: i16,
+    pub battery_v: f32,
+    pub afr: f32,
+    pub rpm: u16,
+    pub ve: u8,
+    pub afr_target: f32,
+    pub advance: i8,
+    pub tps: u8,
+    pub baro: u8,
+    pub pw1_ms: f32,
+    pub dwell_ms: f32,
+    pub loops_per_second: u16,
+    pub vss_kmh: u16,
+    pub gear: u8,
+    pub oil_kpa: u8,
+    pub fuel_kpa: u8,
+}
+
+/// Build a 130-byte 2025.01 `A` packet.
+pub fn encode(v: &SimValues) -> Vec<u8> {
+    let mut p = vec![0u8; PACKET_LEN];
+    let put16 =
+        |p: &mut Vec<u8>, at: usize, x: u16| p[at..at + 2].copy_from_slice(&x.to_le_bytes());
+    let temp = |c: i16| (c + 40).clamp(0, 255) as u8;
+    p[0] = v.secl;
+    p[2] = v.engine;
+    put16(&mut p, 4, v.map_kpa);
+    p[6] = temp(v.iat_c);
+    p[7] = temp(v.coolant_c);
+    p[8] = 100;
+    p[9] = (v.battery_v * 10.0).round().clamp(0.0, 255.0) as u8;
+    p[10] = (v.afr * 10.0).round().clamp(0.0, 255.0) as u8;
+    p[11] = 100;
+    p[12] = 100;
+    p[13] = 100;
+    put16(&mut p, 14, v.rpm);
+    put16(&mut p, 17, 100);
+    p[19] = v.ve;
+    p[21] = (v.afr_target * 10.0).round().clamp(0.0, 255.0) as u8;
+    p[24] = v.advance as u8;
+    p[25] = v.tps;
+    put16(&mut p, 26, v.loops_per_second);
+    put16(&mut p, 28, 4096);
+    p[32] = v.status2;
+    p[41] = v.baro;
+    put16(&mut p, 76, (v.pw1_ms * 10.0).round() as u16);
+    put16(&mut p, 90, (v.dwell_ms * 10.0).round() as u16);
+    p[102] = v.ve;
+    put16(&mut p, 104, v.vss_kmh);
+    p[106] = v.gear;
+    p[107] = v.fuel_kpa;
+    p[108] = v.oil_kpa;
+    p
 }
 
 // ---------------------------------------------------------------------------
@@ -785,7 +816,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_frame_has_normalized_units_and_no_invented_brake_or_gear() {
+    fn canonical_channels_have_normalized_units_and_no_invented_brake_or_gear() {
         let mut packet = [0u8; 130];
         packet[6] = 65;
         packet[7] = 130;
@@ -797,97 +828,167 @@ mod tests {
         packet[24] = (-12i8) as u8;
         packet[118] = (-8i8) as u8;
         packet[119] = (-6i8) as u8;
-        let data = parse_realtime_data(&packet).unwrap();
-        let frame: serde_json::Value =
-            serde_json::from_str(&telemetry_frame(&data, 1234, "boot", 7)).unwrap();
-        assert_eq!(frame["timestampMs"], 1234);
-        assert_eq!(frame["sequence"], 7);
-        assert_eq!(frame["channels"]["rpm"], 6000);
-        assert_eq!(frame["channels"]["ignitionDeg"], -12);
+        packet[41] = 101;
+        packet[4] = 180;
+        let data = parse(&packet).unwrap();
+        let c = canonical(&data);
+        assert_eq!(c["rpm"], 6000.0);
+        assert_eq!(c["ignitionDeg"], -12.0);
+        assert_eq!(c["coolantC"], 90.0);
+        assert_eq!(c["intakeC"], 25.0);
+        assert!((c["batteryV"] - 13.8).abs() < 0.001);
+        assert!((c["afr"] - 14.7).abs() < 0.001);
+        assert_eq!(c["boostKpa"], 79.0);
+        assert!(!c.contains_key("brake"));
+        assert!(!c.contains_key("gear"));
         let legacy = get_params_to_publish(&data);
         assert!(legacy.contains(&("ADV", "-12".into())));
         assert!(legacy.contains(&("AD1", "-8".into())));
         assert!(legacy.contains(&("AD2", "-6".into())));
-        assert_eq!(frame["channels"]["coolantC"], 90);
-        assert_eq!(frame["channels"]["intakeC"], 25);
-        assert!((frame["channels"]["batteryV"].as_f64().unwrap() - 13.8).abs() < 0.001);
-        assert!((frame["channels"]["afr"].as_f64().unwrap() - 14.7).abs() < 0.001);
-        assert!(frame["channels"].get("brake").is_none());
-        assert!(frame["channels"].get("gear").is_none());
+    }
+
+    #[test]
+    fn absent_wideband_and_barometer_are_omitted() {
+        let c = canonical(&parse(&[0u8; 130]).unwrap());
+        assert!(!c.contains_key("afr"));
+        assert!(!c.contains_key("boostKpa"));
+        assert!(!c.contains_key("afrTarget"));
+    }
+
+    #[test]
+    fn real_ecu_packet_from_firmware_202501() {
+        // Captured read-only from a DIY-EFI CORE4 (speeduino 202501) on USB power.
+        let packet = include_bytes!("../../tests/fixtures/speeduino-202501-130.bin");
+        assert_eq!(packet.len(), PACKET_LEN);
+        let d = parse(packet).unwrap();
+        assert_eq!(d.rpm, 0);
+        assert_eq!(d.coolant_celsius(), 82);
+        assert!(d.pw5.is_none(), "2025.01 sends no PW5–PW8");
+        let flags = flags(&d);
+        assert!(
+            flags
+                .iter()
+                .any(|f| f.group == "engine" && f.name == "running")
+        );
+        assert!(
+            !flags
+                .iter()
+                .any(|f| f.group == "engine" && f.name == "running" && f.on)
+        );
+    }
+
+    #[test]
+    fn status_bits_follow_globals_h() {
+        let mut p = [0u8; 130];
+        p[2] = 0b0000_0011; // running + cranking
+        p[32] = 0b1000_0100; // hard rev limit + sync
+        p[85] = 0b0001_0000; // coolant protection
+        p[84] = 0b0100_0000; // nsquirts = 2
+        let d = parse(&p).unwrap();
+        let on: Vec<(&str, &str)> = flags(&d)
+            .iter()
+            .filter(|f| f.on)
+            .map(|f| (f.group, f.name))
+            .collect();
+        assert_eq!(
+            on,
+            [
+                ("engine", "running"),
+                ("engine", "cranking"),
+                ("status2", "hardRevLimit"),
+                ("status2", "sync"),
+                ("engineProtect", "coolant")
+            ]
+        );
+        assert_eq!(squirts_per_cycle(&d), 2);
+    }
+
+    #[test]
+    fn encoder_round_trips_through_the_parser() {
+        let v = SimValues {
+            rpm: 3500,
+            map_kpa: 95,
+            coolant_c: 88,
+            iat_c: 31,
+            battery_v: 13.9,
+            afr: 13.2,
+            tps: 42,
+            baro: 100,
+            advance: 28,
+            ve: 77,
+            pw1_ms: 4.2,
+            dwell_ms: 3.1,
+            afr_target: 13.0,
+            ..SimValues::default()
+        };
+        let d = parse(&encode(&v)).unwrap();
+        assert_eq!(
+            (
+                d.rpm,
+                d.map,
+                d.coolant_celsius(),
+                d.iat_celsius(),
+                d.tps,
+                d.advance
+            ),
+            (3500, 95, 88, 31, 42, 28)
+        );
+        assert!((d.battery_voltage() - 13.9).abs() < 0.01);
+        assert!((d.pw1_ms() - 4.2).abs() < 0.01);
+        let c = canonical(&d);
+        assert_eq!(c["boostKpa"], -5.0);
+        assert!((c["afrTarget"] - 13.0).abs() < 0.01);
     }
 
     fn zero_packet() -> [u8; 130] {
         [0u8; 130]
     }
 
-    #[tokio::test]
-    async fn speeduino_archives_with_mqtt_disabled_or_queue_full() {
-        let path = std::env::temp_dir().join(format!(
-            "g86-speeduino-archive-{}-{}.ndjson",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        let config = Arc::new(AppConfig {
-            telemetry_log: Some(path.to_string_lossy().into_owned()),
-            ..AppConfig::default()
-        });
-        let (sender, _receiver) = mpsc::channel(1);
-        sender.try_send(MqttMessage::new("occupied".into(), "1".into(), 0)).unwrap();
-        process_speeduino_realtime_data(&zero_packet(), &config, None).await.unwrap();
-        process_speeduino_realtime_data(&zero_packet(), &config, Some(&sender)).await.unwrap();
-        let saved = tokio::fs::read_to_string(&path).await.unwrap();
-        let frames: Vec<serde_json::Value> = saved.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0]["source"], "speeduino-primary-a");
-        assert!(frames[1]["sequence"].as_u64().unwrap() > frames[0]["sequence"].as_u64().unwrap());
-        tokio::fs::remove_file(path).await.unwrap();
-    }
-
     // --- Length guards ---
 
     #[test]
     fn test_parse_too_short() {
-        assert!(parse_realtime_data(&[0u8; 50]).is_err());
+        assert!(parse(&[0u8; 50]).is_err());
     }
 
     #[test]
     fn test_parse_empty() {
-        assert!(parse_realtime_data(&[]).is_err());
+        assert!(parse(&[]).is_err());
     }
 
     #[test]
     fn test_parse_129_bytes_too_short() {
-        assert!(parse_realtime_data(&[0u8; 129]).is_err());
+        assert!(parse(&[0u8; 129]).is_err());
     }
 
     #[test]
     fn test_parse_minimum_130_bytes() {
-        assert!(parse_realtime_data(&[0u8; 130]).is_ok());
+        assert!(parse(&[0u8; 130]).is_ok());
     }
 
     #[test]
     fn test_parse_130_bytes_has_emap() {
         // All 130-byte packets include EMAP (130 >= 123)
-        let d = parse_realtime_data(&[0u8; 130]).unwrap();
+        let d = parse(&[0u8; 130]).unwrap();
         assert_eq!(d.emap, Some(0));
     }
 
     #[test]
     fn test_parse_130_bytes_has_extended_fields() {
-        let d = parse_realtime_data(&[0u8; 130]).unwrap();
+        let d = parse(&[0u8; 130]).unwrap();
         assert!(d.knock_retard.is_some()); // byte 129 present
     }
 
     #[test]
     fn test_parse_137_bytes_has_pw5_no_pw8() {
-        let d = parse_realtime_data(&[0u8; 137]).unwrap();
+        let d = parse(&[0u8; 137]).unwrap();
         assert!(d.pw5.is_some()); // 137 >= 132
         assert!(d.pw8.is_none()); // 137 < 138
     }
 
     #[test]
     fn test_parse_138_bytes_all_pw_fields() {
-        let d = parse_realtime_data(&[0u8; 138]).unwrap();
+        let d = parse(&[0u8; 138]).unwrap();
         assert!(d.pw5.is_some());
         assert!(d.pw8.is_some());
     }
@@ -898,14 +999,14 @@ mod tests {
     fn test_secl_byte_0() {
         let mut p = zero_packet();
         p[0] = 42;
-        assert_eq!(parse_realtime_data(&p).unwrap().secl, 42);
+        assert_eq!(parse(&p).unwrap().secl, 42);
     }
 
     #[test]
     fn test_sync_loss_counter_byte_3() {
         let mut p = zero_packet();
         p[3] = 7;
-        assert_eq!(parse_realtime_data(&p).unwrap().sync_loss_counter, 7);
+        assert_eq!(parse(&p).unwrap().sync_loss_counter, 7);
     }
 
     #[test]
@@ -913,7 +1014,7 @@ mod tests {
         let mut p = zero_packet();
         p[4] = 0x2C;
         p[5] = 0x01; // 300 kPa
-        assert_eq!(parse_realtime_data(&p).unwrap().map, 300);
+        assert_eq!(parse(&p).unwrap().map, 300);
     }
 
     #[test]
@@ -921,7 +1022,7 @@ mod tests {
         let mut p = zero_packet();
         p[14] = 0xB8;
         p[15] = 0x0B; // 3000 RPM
-        assert_eq!(parse_realtime_data(&p).unwrap().rpm, 3000);
+        assert_eq!(parse(&p).unwrap().rpm, 3000);
     }
 
     #[test]
@@ -929,7 +1030,7 @@ mod tests {
         let mut p = zero_packet();
         p[17] = 0xE8;
         p[18] = 0x03; // 1000
-        assert_eq!(parse_realtime_data(&p).unwrap().corrections, 1000);
+        assert_eq!(parse(&p).unwrap().corrections, 1000);
     }
 
     #[test]
@@ -937,7 +1038,7 @@ mod tests {
         let mut p = zero_packet();
         p[19] = 85;
         p[20] = 90;
-        let d = parse_realtime_data(&p).unwrap();
+        let d = parse(&p).unwrap();
         assert_eq!(d.ve1, 85);
         assert_eq!(d.ve2, 90);
     }
@@ -946,7 +1047,7 @@ mod tests {
     fn test_afr_target_byte_21() {
         let mut p = zero_packet();
         p[21] = 147;
-        let d = parse_realtime_data(&p).unwrap();
+        let d = parse(&p).unwrap();
         assert!((d.afr_target_real() - 14.7).abs() < 0.01);
     }
 
@@ -955,21 +1056,21 @@ mod tests {
         let mut p = zero_packet();
         p[22] = 0xC8;
         p[23] = 0x00; // 200
-        assert_eq!(parse_realtime_data(&p).unwrap().tps_dot, 200);
+        assert_eq!(parse(&p).unwrap().tps_dot, 200);
     }
 
     #[test]
     fn test_advance_byte_24() {
         let mut p = zero_packet();
         p[24] = 30;
-        assert_eq!(parse_realtime_data(&p).unwrap().advance, 30);
+        assert_eq!(parse(&p).unwrap().advance, 30);
     }
 
     #[test]
     fn test_tps_byte_25() {
         let mut p = zero_packet();
         p[25] = 75;
-        assert_eq!(parse_realtime_data(&p).unwrap().tps, 75);
+        assert_eq!(parse(&p).unwrap().tps, 75);
     }
 
     #[test]
@@ -977,7 +1078,7 @@ mod tests {
         let mut p = zero_packet();
         p[76] = 35;
         p[77] = 0; // 3.5 ms
-        let d = parse_realtime_data(&p).unwrap();
+        let d = parse(&p).unwrap();
         assert_eq!(d.pw1, 35);
         assert!((d.pw1_ms() - 3.5).abs() < 0.01);
     }
@@ -987,7 +1088,7 @@ mod tests {
         let mut p = zero_packet();
         p[90] = 45;
         p[91] = 0; // 4.5 ms
-        let d = parse_realtime_data(&p).unwrap();
+        let d = parse(&p).unwrap();
         assert_eq!(d.dwell, 45);
         assert!((d.dwell_ms() - 4.5).abs() < 0.01);
     }
@@ -997,21 +1098,21 @@ mod tests {
         let mut p = zero_packet();
         p[93] = 0x64;
         p[94] = 0x00; // 100
-        assert_eq!(parse_realtime_data(&p).unwrap().map_dot, 100);
+        assert_eq!(parse(&p).unwrap().map_dot, 100);
     }
 
     #[test]
     fn test_ve_current_byte_102() {
         let mut p = zero_packet();
         p[102] = 88;
-        assert_eq!(parse_realtime_data(&p).unwrap().ve_current, 88);
+        assert_eq!(parse(&p).unwrap().ve_current, 88);
     }
 
     #[test]
     fn test_ts_sd_status_byte_120() {
         let mut p = zero_packet();
         p[120] = 3;
-        assert_eq!(parse_realtime_data(&p).unwrap().ts_sd_status, 3);
+        assert_eq!(parse(&p).unwrap().ts_sd_status, 3);
     }
 
     // --- CAN inputs ---
@@ -1021,7 +1122,7 @@ mod tests {
         let mut p = zero_packet();
         p[42] = 0x00;
         p[43] = 0x02; // 512
-        assert_eq!(parse_realtime_data(&p).unwrap().canin[0], 512);
+        assert_eq!(parse(&p).unwrap().canin[0], 512);
     }
 
     #[test]
@@ -1029,7 +1130,7 @@ mod tests {
         let mut p = zero_packet();
         p[72] = 0xFF;
         p[73] = 0x00; // 255
-        assert_eq!(parse_realtime_data(&p).unwrap().canin[15], 255);
+        assert_eq!(parse(&p).unwrap().canin[15], 255);
     }
 
     // --- Temperature offset ---
@@ -1038,20 +1139,20 @@ mod tests {
     fn test_iat_celsius() {
         let mut p = zero_packet();
         p[6] = 80; // 80 - 40 = 40°C
-        assert_eq!(parse_realtime_data(&p).unwrap().iat_celsius(), 40);
+        assert_eq!(parse(&p).unwrap().iat_celsius(), 40);
     }
 
     #[test]
     fn test_coolant_celsius() {
         let mut p = zero_packet();
         p[7] = 125; // 85°C
-        assert_eq!(parse_realtime_data(&p).unwrap().coolant_celsius(), 85);
+        assert_eq!(parse(&p).unwrap().coolant_celsius(), 85);
     }
 
     #[test]
     fn test_zero_raw_temp_is_minus_40c() {
         let p = zero_packet();
-        let d = parse_realtime_data(&p).unwrap();
+        let d = parse(&p).unwrap();
         assert_eq!(d.iat_celsius(), -40);
         assert_eq!(d.coolant_celsius(), -40);
     }
@@ -1062,31 +1163,31 @@ mod tests {
     fn test_boost_target_times_2() {
         let mut p = zero_packet();
         p[30] = 100;
-        assert_eq!(parse_realtime_data(&p).unwrap().boost_target_kpa(), 200);
+        assert_eq!(parse(&p).unwrap().boost_target_kpa(), 200);
     }
 
     #[test]
     fn test_tae_amount_times_2() {
         let mut p = zero_packet();
         p[16] = 25;
-        assert_eq!(parse_realtime_data(&p).unwrap().tae_amount_pct(), 50);
+        assert_eq!(parse(&p).unwrap().tae_amount_pct(), 50);
     }
 
     #[test]
     fn test_battery_voltage_div_10() {
         let mut p = zero_packet();
         p[9] = 142; // 14.2 V
-        assert!((parse_realtime_data(&p).unwrap().battery_voltage() - 14.2).abs() < 0.01);
+        assert!((parse(&p).unwrap().battery_voltage() - 14.2).abs() < 0.01);
     }
 
-    // --- Validation (warnings only, should not fail) ---
+    // --- Implausible values parse; canonical() omits them ---
 
     #[test]
     fn test_validation_does_not_fail_on_overflow() {
         let mut p = zero_packet();
         p[14] = 0xFF;
         p[15] = 0xFF; // RPM = 65535
-        assert!(parse_realtime_data(&p).is_ok());
+        assert!(parse(&p).is_ok());
     }
 
     // --- params list ---
@@ -1155,15 +1256,5 @@ mod tests {
             let found = params.iter().any(|(k, _)| *k == code.as_str());
             assert!(found, "missing param {}", code);
         }
-    }
-
-    #[test]
-    fn test_get_parsed_data_too_short() {
-        assert!(get_parsed_data(&[0u8; 10]).is_err());
-    }
-
-    #[test]
-    fn test_get_parsed_data_valid() {
-        assert!(get_parsed_data(&[0u8; 130]).is_ok());
     }
 }

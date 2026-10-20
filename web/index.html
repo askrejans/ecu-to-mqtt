@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#08090a">
+  <title>ecu-to-mqtt</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="brand"><span class="name">ecu-to-mqtt</span><span class="ver" id="version">—</span></div>
+    <div class="lamps" aria-label="Link status">
+      <span class="lamp" id="lamp-ecu" title="ECU link"><i></i>ECU</span>
+      <span class="lamp" id="lamp-engine" title="Engine running"><i></i>Engine</span>
+      <span class="lamp" id="lamp-mqtt" title="MQTT broker"><i></i>MQTT</span>
+      <span class="lamp" id="lamp-link" title="Dashboard data stream"><i></i>Live</span>
+    </div>
+    <div class="clock"><span class="lbl" id="fw">—</span></div>
+  </header>
+
+  <section class="panel readout" aria-label="Primary readout">
+    <div class="cell wide"><span class="lbl">Engine speed</span><span class="val big"><b id="r-rpm">—</b><small>rpm</small></span><span class="sub" id="r-rpm-sub">&nbsp;</span></div>
+    <div class="cell"><span class="lbl">Throttle</span><span class="val"><b id="r-tps">—</b><small>%</small></span><span class="sub">&nbsp;</span></div>
+    <div class="cell"><span class="lbl">Manifold</span><span class="val"><b id="r-map">—</b><small>kPa</small></span><span class="sub" id="r-map-sub">&nbsp;</span></div>
+    <div class="cell"><span class="lbl">AFR</span><span class="val"><b id="r-afr">—</b></span><span class="sub" id="r-afr-sub">&nbsp;</span></div>
+    <div class="cell"><span class="lbl">Coolant</span><span class="val"><b id="r-clt">—</b><small>°C</small></span><span class="sub" id="r-clt-sub">&nbsp;</span></div>
+    <div class="cell"><span class="lbl">Battery</span><span class="val"><b id="r-bat">—</b><small>V</small></span><span class="sub">&nbsp;</span></div>
+    <div class="cell"><span class="lbl">Data rate</span><span class="val"><b id="r-rate">—</b><small>Hz</small></span><span class="sub" id="r-rate-sub">&nbsp;</span></div>
+  </section>
+
+  <nav class="keys" aria-label="Mode">
+    <button class="key" data-mode="dash"><i class="led"></i>Dash</button>
+    <button class="key" data-mode="engine"><i class="led"></i>Engine</button>
+    <button class="key" data-mode="charts"><i class="led"></i>Charts</button>
+    <button class="key" data-mode="diag"><i class="led"></i>Diagnostics</button>
+    <button class="key" data-mode="config"><i class="led"></i>Configuration</button>
+    <span class="spacer"></span>
+    <span class="keygrp">
+    <button class="key small" id="k-temp" title="Temperature units"><i class="led on"></i><span id="k-temp-t">°C</span></button>
+    <button class="key small" id="k-theme" title="Light or dark theme"><i class="led on"></i><span id="k-theme-t">Dark</span></button>
+    </span>
+  </nav>
+
+  <main>
+    <section class="mode" id="mode-dash" hidden>
+      <article class="panel">
+        <h2>Status</h2>
+        <div class="lamps-row" id="dash-lamps"></div>
+      </article>
+      <div class="grid g-dash" id="dash-gauges"></div>
+    </section>
+
+    <section class="mode" id="mode-engine" hidden>
+      <div class="grid g-engine">
+        <article class="panel">
+          <h2>Channels <span class="note">canonical, as published on MQTT</span></h2>
+          <div class="table-wrap"><table class="tbl" id="ch-table">
+            <thead><tr><th>Channel</th><th class="n">Value</th><th>Unit</th><th class="n">Age</th></tr></thead><tbody></tbody>
+          </table></div>
+        </article>
+        <article class="panel">
+          <h2>ECU parameters <span class="note" id="detail-note">full realtime packet</span></h2>
+          <div class="cfg" id="detail-groups"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="mode" id="mode-charts" hidden>
+      <article class="panel">
+        <h2>Live charts <span class="note" id="chart-note">rolling window</span></h2>
+        <div class="actions top">
+          <button class="key small" data-window="30"><i class="led"></i>30 s</button>
+          <button class="key small" data-window="60"><i class="led"></i>60 s</button>
+          <button class="key small" data-window="120"><i class="led"></i>2 min</button>
+          <button class="key small" id="k-chart-pause"><i class="led"></i><span>Pause</span></button>
+        </div>
+        <div class="picker" id="chart-picker"></div>
+      </article>
+      <div class="charts" id="charts"></div>
+    </section>
+
+    <section class="mode" id="mode-diag" hidden>
+      <div class="grid g-diag">
+        <article class="panel">
+          <h2>Status bits <span class="note">firmware 2025.01 definitions</span></h2>
+          <div class="flags" id="diag-flags"></div>
+        </article>
+        <article class="panel">
+          <h2>Link</h2>
+          <dl class="kv" id="diag-link"></dl>
+          <h2>Counters</h2>
+          <dl class="kv" id="diag-counters"></dl>
+          <h2>Controller</h2>
+          <dl class="kv" id="diag-ecu"></dl>
+        </article>
+      </div>
+    </section>
+
+    <section class="mode" id="mode-config" hidden>
+      <div class="grid g-cfg">
+        <article class="panel">
+          <h2>Wiring</h2>
+          <dl class="kv" id="cfg-wiring"></dl>
+          <h2>Endpoints</h2>
+          <ul class="links" id="cfg-endpoints"></ul>
+        </article>
+        <article class="panel span2">
+          <h2>Effective configuration <span class="note">read-only · secrets masked · edit settings.toml or ECU_TO_MQTT_* variables</span></h2>
+          <div class="cfg" id="cfg-groups"></div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="auth">
+    <form method="dialog" class="panel">
+      <h2>Access token required</h2>
+      <p>This gateway protects its API with <code>http_token</code>. The token is kept in this browser only.</p>
+      <input id="auth-token" type="password" autocomplete="current-password" placeholder="Bearer token" required>
+      <div class="actions"><button class="key" value="ok"><i class="led on"></i>Connect</button></div>
+    </form>
+  </dialog>
+
+  <footer class="foot"><span id="foot-source">—</span><span id="foot-uptime"></span></footer>
+</body>
+</html>

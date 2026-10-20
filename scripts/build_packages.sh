@@ -13,11 +13,8 @@
 #   --help      Show this help
 #
 # Cross-compilation targets produced:
-#   Linux   x86    → i686-unknown-linux-gnu          → .deb + .rpm
 #   Linux   x64    → x86_64-unknown-linux-gnu         → .deb + .rpm
-#   Linux   arm    → armv7-unknown-linux-gnueabihf    → .deb + .rpm
 #   Linux   arm64  → aarch64-unknown-linux-gnu        → .deb + .rpm
-#   Windows x86    → i686-pc-windows-gnu              → .zip
 #   Windows x64    → x86_64-pc-windows-gnu            → .zip
 #   macOS   x64    → x86_64-apple-darwin              → .tar.gz
 #   macOS   arm64  → aarch64-apple-darwin             → .tar.gz
@@ -36,6 +33,14 @@
 # =============================================================================
 
 set -euo pipefail
+
+# Prefer the rustup-managed toolchain: cross mounts the active toolchain into
+# Docker (a Homebrew rust under /opt/homebrew/Cellar is not shareable), and
+# rustup provides the std libraries for the other macOS/Windows targets.
+if command -v rustup >/dev/null 2>&1; then
+    RUSTUP_CARGO="$(rustup which cargo 2>/dev/null || true)"
+    [[ -n "$RUSTUP_CARGO" ]] && export PATH="$(dirname "$RUSTUP_CARGO"):$PATH"
+fi
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -82,7 +87,7 @@ PKG_NAME="ecu-to-mqtt"
 PKG_VERSION="$(grep '^version' "$PROJECT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 PKG_DESCRIPTION="ECU to MQTT bridge service (Speeduino, MegaSquirt, CAN profiles)"
 PKG_MAINTAINER="askrejans <arvis.skrejans@gmail.com>"
-PKG_LICENSE="MIT"
+PKG_LICENSE="GPL-3.0-only"
 PKG_URL="https://github.com/askrejans/ecu-to-mqtt"
 SERVICE_FILE="$PROJECT_DIR/ecu-to-mqtt.service"
 
@@ -193,6 +198,9 @@ check_docker() {
         # cross Docker images are x86_64-only. On Apple Silicon, tell Docker to
         # pull and run the amd64 image via Rosetta emulation (transparent, fast).
         export DOCKER_DEFAULT_PLATFORM=linux/amd64
+        # cross mounts the host cargo registry; make sure every crate source
+        # of the lockfile is extracted there before the containers compile.
+        (cd "$PROJECT_DIR" && cargo fetch --locked) || die "cargo fetch failed"
     fi
 }
 
@@ -221,7 +229,8 @@ build_binary() {
         require_cmd cross "Install with: cargo install cross  (also needs Docker)"
         # Run cross from the project dir – cross maps cwd into the container,
         # so --manifest-path with a host path breaks inside Docker.
-        (cd "$PROJECT_DIR" && cross build --release --target "$triple")
+        # cross container images are amd64-only; on Apple Silicon use Rosetta via DOCKER_DEFAULT_PLATFORM.
+        (cd "$PROJECT_DIR" && DOCKER_DEFAULT_PLATFORM=linux/amd64 cross build --release --target "$triple")
     else
         rustup target add "$triple" 2>/dev/null || true
         (cd "$PROJECT_DIR" && cargo build --release --target "$triple")
@@ -275,6 +284,10 @@ build_deb() {
 
     [[ -f "$PROJECT_DIR/example.settings.toml" ]] && \
         cp "$PROJECT_DIR/example.settings.toml" "$config_dir/settings.toml.example"
+
+    # GPL-3.0: ship the licence text (Debian policy location)
+    mkdir -p "$pkg_root/usr/share/doc/$PKG_NAME"
+    cp "$PROJECT_DIR/LICENSE" "$pkg_root/usr/share/doc/$PKG_NAME/copyright"
 
     cat > "$debian_dir/control" <<EOF
 Package: $PKG_NAME
@@ -350,6 +363,7 @@ build_rpm() {
         cp "$SERVICE_FILE" "$rpm_sources/${PKG_NAME}.service"
     [[ -f "$PROJECT_DIR/example.settings.toml" ]] && \
         cp "$PROJECT_DIR/example.settings.toml" "$rpm_sources/settings.toml.example"
+    cp "$PROJECT_DIR/LICENSE" "$rpm_sources/LICENSE"
 
     local spec_file="$rpm_specs/${PKG_NAME}.spec"
     cat > "$spec_file" <<EOF
@@ -376,6 +390,7 @@ gateway. Runs as a systemd service in production or as an interactive TUI.
 %prep
 
 %build
+cp %{_sourcedir}/LICENSE %{_builddir}/LICENSE
 
 %install
 mkdir -p %{buildroot}%{_bindir}
@@ -394,6 +409,7 @@ getent passwd $PKG_NAME >/dev/null || \
             -G dialout,tty $PKG_NAME || true
 
 %files
+%license LICENSE
 %{_bindir}/$PKG_NAME
 %{_unitdir}/${PKG_NAME}.service
 %dir %{_sysconfdir}/$PKG_NAME
@@ -473,13 +489,12 @@ EOF
 # Windows ZIP (binary + example config)
 # ---------------------------------------------------------------------------
 build_win_zip() {
-    local target="$1"   # win-x86 or win-x64
+    local target="$1"   # win-x64
     local bin_path
     bin_path="$(require_binary "$target")"
 
     local arch_label
     case "$target" in
-        win-x86) arch_label="windows-x86" ;;
         win-x64) arch_label="windows-x64" ;;
     esac
 
@@ -490,6 +505,7 @@ build_win_zip() {
     cp "$bin_path" "$stage_dir/${PKG_NAME}.exe"
     [[ -f "$PROJECT_DIR/example.settings.toml" ]] && \
         cp "$PROJECT_DIR/example.settings.toml" "$stage_dir/settings.toml.example"
+    cp "$PROJECT_DIR/LICENSE" "$stage_dir/LICENSE"
     cat > "$stage_dir/README.txt" <<EOF
 $PKG_NAME v$PKG_VERSION – Windows
 
@@ -535,6 +551,7 @@ build_mac_targz() {
     chmod 755 "$stage_dir/$PKG_NAME"
     [[ -f "$PROJECT_DIR/example.settings.toml" ]] && \
         cp "$PROJECT_DIR/example.settings.toml" "$stage_dir/settings.toml.example"
+    cp "$PROJECT_DIR/LICENSE" "$stage_dir/LICENSE"
 
     local tgz_file="$MAC_DIR/${PKG_NAME}_${PKG_VERSION}_${arch_label}.tar.gz"
     tar -czf "$tgz_file" -C "$stage_dir" .
@@ -568,24 +585,18 @@ for target in "${LINUX_TARGETS[@]:-}"; do
         targz) warn "targz not applicable to Linux targets" ;;
         zip)   warn "zip not applicable to Linux targets" ;;
         all)
-            build_deb "$target" || warn "DEB build failed for $target"
-            build_rpm "$target" || warn "RPM build failed for $target"
+            build_deb "$target" || die "DEB build failed for $target"
+            build_rpm "$target" || die "RPM build failed for $target"
             ;;
     esac
 done
 
 # ----- Windows -----
-# paho-mqtt-sys builds the Paho C library via cmake inside the cross Docker
-# container. The old mingw-w64 toolchain (GCC 7.3.0 in cross 0.2.5) needs
-# _WIN32_WINNT=0x0600 so that winsock2.h defines struct pollfd / WSAPoll.
-# Cross.toml passes this var through to the container (see Cross.toml).
-export CFLAGS_x86_64_pc_windows_gnu="-D_WIN32_WINNT=0x0600"
-
 for target in "${WIN_TARGETS[@]:-}"; do
     [[ -z "$target" ]] && continue
     log "=== Windows target: $target ==="
     case "$PKG_TYPE" in
-        zip|all) build_win_zip "$target" || warn "Windows ZIP failed for $target" ;;
+        zip|all) build_win_zip "$target" || die "Windows ZIP failed for $target" ;;
         deb|rpm) warn "deb/rpm not applicable to Windows targets" ;;
     esac
 done
@@ -595,7 +606,7 @@ for target in "${MAC_TARGETS[@]:-}"; do
     [[ -z "$target" ]] && continue
     log "=== macOS target: $target ==="
     case "$PKG_TYPE" in
-        targz|all) build_mac_targz "$target" || warn "macOS tar.gz failed for $target" ;;
+        targz|all) build_mac_targz "$target" || die "macOS tar.gz failed for $target" ;;
         deb|rpm)   warn "deb/rpm not applicable to macOS targets" ;;
     esac
 done
