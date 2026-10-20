@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0
+## 0.7.2
 
 ### Added
 - On-demand telemetry for consumers on slow links. Publish a reply topic to
