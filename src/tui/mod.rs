@@ -574,8 +574,9 @@ fn render_ecu_data(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
     fn c(label: &str, value: String) -> (String, String) {
         (label.to_string(), value)
     }
-    fn ms10(raw: u16) -> String {
-        format!("{:.1}ms", raw as f32 / 10.0)
+    // Firmware time fields are microseconds.
+    fn ms10(us: u16) -> String {
+        format!("{:.2}ms", us as f32 / 1000.0)
     }
     fn opt_ms10(o: Option<u16>) -> String {
         o.map_or_else(|| "—".into(), ms10)
@@ -613,12 +614,12 @@ fn render_ecu_data(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
     lines.push(row(vec![
         c("RPM", d.rpm.to_string()),
         c("MAP", format!("{} kPa", d.map)),
-        c("TPS", format!("{}%", d.tps)),
+        c("TPS", format!("{}%", d.tps_pct())),
     ]));
     lines.push(row(vec![
         c("DRPM", format!("{:+}/s", d.rpm_dot)),
-        c("DMAP", format!("{:.1} kPa/s", d.map_dot as f32 / 10.0)),
-        c("DTPS", format!("{:.1}%/s", d.tps_dot as f32 / 10.0)),
+        c("DMAP", format!("{} kPa/s", d.map_dot)),
+        c("DTPS", format!("{}%/s", d.tps_dot)),
     ]));
     lines.push(row(vec![
         c("ADV", format!("{}°", d.advance)),
@@ -711,14 +712,14 @@ fn render_ecu_data(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
         c("ETH", format!("{}%", d.ethanol_pct)),
     ]));
     lines.push(row(vec![
-        c("VVT1", format!("{}°", d.vvt1_angle)),
-        c("VT1T", format!("{}°", d.vvt1_target_angle)),
-        c("VT1D", format!("{}%", d.vvt1_duty)),
+        c("VVT1", format!("{}°", f32::from(d.vvt1_angle) / 2.0)),
+        c("VT1T", format!("{}°", f32::from(d.vvt1_target_angle) / 2.0)),
+        c("VT1D", format!("{}%", f32::from(d.vvt1_duty) / 2.0)),
     ]));
     lines.push(row(vec![
-        c("VVT2", format!("{}°", d.vvt2_angle)),
-        c("VT2T", format!("{}°", d.vvt2_target_angle)),
-        c("VT2D", format!("{}%", d.vvt2_duty)),
+        c("VVT2", format!("{}°", f32::from(d.vvt2_angle) / 2.0)),
+        c("VT2T", format!("{}°", f32::from(d.vvt2_target_angle) / 2.0)),
+        c("VT2D", format!("{}%", f32::from(d.vvt2_duty) / 2.0)),
     ]));
     lines.push(row(vec![
         c("FLXI", format!("{}°", d.flex_ign_correction)),
@@ -740,11 +741,15 @@ fn render_ecu_data(f: &mut Frame, area: Rect, snap: &StateSnapshot) {
         c("WMI", format!("{} µs", d.wmi_pw)),
     ]));
     lines.push(row(vec![
-        c("OIL", format!("{} kPa", d.oil_pressure)),
-        c("FPRS", format!("{} kPa", d.fuel_pressure)),
+        c("OIL", format!("{} PSI", d.oil_pressure)),
+        c("FPRS", format!("{} PSI", d.fuel_pressure)),
     ]));
     lines.push(row(vec![
-        c("FAN", opt_unit(d.fan_duty, "%")),
+        c(
+            "FAN",
+            d.fan_duty
+                .map_or_else(|| "—".into(), |v| format!("{}%", f32::from(v) / 2.0)),
+        ),
         c(
             "ACS",
             d.air_con_status

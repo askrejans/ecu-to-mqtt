@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.1
+
+### Fixed
+- Speeduino field scaling now follows firmware 202501.6 (`logger.cpp`,
+  `sensors.cpp`, `globals.h` and its `speeduino.ini`), verified against a real
+  controller:
+  - TPS is sent in 0.5 % steps (since firmware 202201): `throttle` and the
+    `TPS` topic were twice the real value.
+  - Pulse widths (`PW1`–`PW8`) and dwell (`dwell`, `actualDwell`) are
+    microseconds: `injectorPwMs`, `dwellMs` and the `PW*`/`DWL`/`ADW` topics
+    were 100× too large.
+  - Boost duty is a percentage (`BSD` was ×100); VVT angles/targets/duty and
+    fan duty are 0.5 steps.
+  - TPSdot, MAPdot, fuel/ignition load, flex ignition and flex boost
+    corrections are signed. Oil and fuel pressure are PSI.
+
 ## 0.7.0
 
 ### Contract changes

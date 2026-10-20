@@ -65,11 +65,11 @@ pub struct SpeeduinoData {
     pub ve2: u8,
     /// Byte 21 – AFR target (stored × 10, e.g. 147 = 14.7)
     pub afr_target: u8,
-    /// Bytes 22–23 – TPS rate of change (% × 10 per 100 ms, little-endian u16)
-    pub tps_dot: u16,
+    /// Bytes 22–23 – TPS rate of change (%/s, little-endian i16)
+    pub tps_dot: i16,
     /// Byte 24 – ignition advance (degrees BTDC)
     pub advance: i8,
-    /// Byte 25 – throttle position (0–100 %)
+    /// Byte 25 – throttle position in 0.5 % steps (0–200; `sensors.cpp` maps to 0..200)
     pub tps: u8,
 
     /// Bytes 26–27 – MCU loops per second (little-endian u16)
@@ -79,7 +79,7 @@ pub struct SpeeduinoData {
 
     /// Byte 30 – boost target (stored >> 1; × 2 for actual kPa)
     pub boost_target_raw: u8,
-    /// Byte 31 – boost solenoid duty (stored / 100; × 100 for actual %)
+    /// Byte 31 – boost solenoid duty (%; the firmware sends `boostDuty / 100`)
     pub boost_duty_raw: u8,
     /// Byte 32 – `status2` bitfield (launch, rev limiters, boost cut, sync)
     pub status2: u8,
@@ -90,8 +90,8 @@ pub struct SpeeduinoData {
     pub ethanol_pct: u8,
     /// Byte 36 – flex-fuel fuel correction (%)
     pub flex_correction: u8,
-    /// Byte 37 – flex-fuel ignition correction (degrees)
-    pub flex_ign_correction: u8,
+    /// Byte 37 – flex-fuel ignition correction (degrees, signed)
+    pub flex_ign_correction: i8,
     /// Byte 38 – idle load
     pub idle_load: u8,
     /// Byte 39 – test outputs bitfield
@@ -109,7 +109,7 @@ pub struct SpeeduinoData {
     /// Byte 75 – next error code
     pub next_error: u8,
 
-    /// Bytes 76–77 – injector pulse width 1 (µs / 10, little-endian u16)
+    /// Bytes 76–77 – injector pulse width 1 (µs, little-endian u16)
     pub pw1: u16,
     /// Bytes 78–79 – injector pulse width 2
     pub pw2: u16,
@@ -123,27 +123,27 @@ pub struct SpeeduinoData {
     /// Byte 85 – engine protection status
     pub engine_protect_status: u8,
 
-    /// Bytes 86–87 – fuel load (little-endian u16)
-    pub fuel_load: u16,
-    /// Bytes 88–89 – ignition load (little-endian u16)
-    pub ign_load: u16,
-    /// Bytes 90–91 – dwell time (0.1 ms units, little-endian u16)
+    /// Bytes 86–87 – fuel load (little-endian i16; kPa for speed-density)
+    pub fuel_load: i16,
+    /// Bytes 88–89 – ignition load (little-endian i16)
+    pub ign_load: i16,
+    /// Bytes 90–91 – dwell time (µs, little-endian u16)
     pub dwell: u16,
 
-    /// Byte 92 – closed-loop idle target
+    /// Byte 92 – closed-loop idle target (rpm / 10)
     pub cl_idle_target: u8,
-    /// Bytes 93–94 – MAP rate of change (kPa × 10 per 100 ms, little-endian u16)
-    pub map_dot: u16,
+    /// Bytes 93–94 – MAP rate of change (kPa/s, little-endian i16)
+    pub map_dot: i16,
 
-    /// Bytes 95–96 – VVT1 cam angle (little-endian i16, degrees)
+    /// Bytes 95–96 – VVT1 cam angle (little-endian i16, 0.5° steps)
     pub vvt1_angle: i16,
-    /// Byte 97 – VVT1 target angle (degrees)
+    /// Byte 97 – VVT1 target angle (0.5° steps)
     pub vvt1_target_angle: u8,
-    /// Byte 98 – VVT1 solenoid duty (%)
+    /// Byte 98 – VVT1 solenoid duty (0.5 % steps)
     pub vvt1_duty: u8,
 
-    /// Bytes 99–100 – flex-fuel boost correction (little-endian u16)
-    pub flex_boost_correction: u16,
+    /// Bytes 99–100 – flex-fuel boost correction (kPa, little-endian i16)
+    pub flex_boost_correction: i16,
     /// Byte 101 – barometric pressure correction (%)
     pub baro_correction: u8,
     /// Byte 102 – current effective VE (blended from VE1/VE2, %)
@@ -155,20 +155,20 @@ pub struct SpeeduinoData {
     pub vss: u16,
     /// Byte 106 – current gear
     pub gear: u8,
-    /// Byte 107 – fuel pressure (kPa)
+    /// Byte 107 – fuel pressure (PSI)
     pub fuel_pressure: u8,
-    /// Byte 108 – oil pressure (kPa)
+    /// Byte 108 – oil pressure (PSI)
     pub oil_pressure: u8,
     /// Byte 109 – water-methanol injection pulse width
     pub wmi_pw: u8,
     /// Byte 110 – status4 bitfield
     pub status4: u8,
 
-    /// Bytes 111–112 – VVT2 cam angle (little-endian i16, degrees)
+    /// Bytes 111–112 – VVT2 cam angle (little-endian i16, 0.5° steps)
     pub vvt2_angle: i16,
-    /// Byte 113 – VVT2 target angle (degrees)
+    /// Byte 113 – VVT2 target angle (0.5° steps)
     pub vvt2_target_angle: u8,
-    /// Byte 114 – VVT2 solenoid duty (%)
+    /// Byte 114 – VVT2 solenoid duty (0.5 % steps)
     pub vvt2_duty: u8,
 
     /// Byte 115 – outputs status bitfield
@@ -189,11 +189,11 @@ pub struct SpeeduinoData {
     pub emap: Option<u16>,
 
     // ---- Extended fields (bytes 123–129): present in all 130-byte packets ----
-    /// Byte 123 – radiator fan duty cycle (%)
+    /// Byte 123 – radiator fan duty cycle (0.5 % steps)
     pub fan_duty: Option<u8>,
     /// Byte 124 – air conditioning status bitfield
     pub air_con_status: Option<u8>,
-    /// Bytes 125–126 – actual (measured) dwell time (0.1 ms units, little-endian u16)
+    /// Bytes 125–126 – actual (measured) dwell time (µs, little-endian u16)
     pub actual_dwell: Option<u16>,
     /// Byte 127 – status5 bitfield
     pub status5: Option<u8>,
@@ -235,29 +235,43 @@ impl SpeeduinoData {
     pub fn boost_target_kpa(&self) -> u16 {
         self.boost_target_raw as u16 * 2
     }
-    pub fn boost_duty_pct(&self) -> u32 {
-        self.boost_duty_raw as u32 * 100
+    pub fn boost_duty_pct(&self) -> u8 {
+        self.boost_duty_raw
+    }
+    /// Throttle in % (the byte carries 0.5 % steps).
+    pub fn tps_pct(&self) -> f32 {
+        self.tps as f32 / 2.0
     }
     pub fn pw1_ms(&self) -> f32 {
-        self.pw1 as f32 / 10.0
+        us_to_ms(self.pw1)
     }
     pub fn pw2_ms(&self) -> f32 {
-        self.pw2 as f32 / 10.0
+        us_to_ms(self.pw2)
     }
     pub fn pw3_ms(&self) -> f32 {
-        self.pw3 as f32 / 10.0
+        us_to_ms(self.pw3)
     }
     pub fn pw4_ms(&self) -> f32 {
-        self.pw4 as f32 / 10.0
+        us_to_ms(self.pw4)
     }
     pub fn dwell_ms(&self) -> f32 {
-        self.dwell as f32 / 10.0
+        us_to_ms(self.dwell)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Internal parser
 // ---------------------------------------------------------------------------
+
+/// Firmware time fields (`PW1`–`PW8`, `dwell`, `actualDwell`) are microseconds.
+fn us_to_ms(us: u16) -> f32 {
+    us as f32 / 1000.0
+}
+
+/// Value of a 0.5-step field (VVT angles and duty, fan duty).
+fn half(v: impl Into<f32>) -> f32 {
+    v.into() / 2.0
+}
 
 /// Parse a primary-serial `A` packet (≥ 130 bytes).
 pub fn parse(data: &[u8]) -> Result<SpeeduinoData> {
@@ -363,7 +377,7 @@ pub fn parse(data: &[u8]) -> Result<SpeeduinoData> {
         ve2: data[20],
         afr_target: data[21],
         // ---- Bytes 22–41 — NOTE: tpsDOT is u16 (two bytes) ----
-        tps_dot: u16_le(22, 23),
+        tps_dot: i16_le(22, 23),
         advance: data[24] as i8,
         tps: data[25],
         loops_per_second: u16_le(26, 27),
@@ -374,7 +388,7 @@ pub fn parse(data: &[u8]) -> Result<SpeeduinoData> {
         rpm_dot: i16_le(33, 34),
         ethanol_pct: data[35],
         flex_correction: data[36],
-        flex_ign_correction: data[37],
+        flex_ign_correction: data[37] as i8,
         idle_load: data[38],
         test_outputs: data[39],
         o2_secondary: data[40],
@@ -390,16 +404,16 @@ pub fn parse(data: &[u8]) -> Result<SpeeduinoData> {
         pw4: u16_le(82, 83),
         status3: data[84],
         engine_protect_status: data[85],
-        fuel_load: u16_le(86, 87),
-        ign_load: u16_le(88, 89),
+        fuel_load: i16_le(86, 87),
+        ign_load: i16_le(88, 89),
         dwell: u16_le(90, 91),
         // ---- Bytes 92–120 — NOTE: mapDOT is u16 (two bytes) ---
         cl_idle_target: data[92],
-        map_dot: u16_le(93, 94),
+        map_dot: i16_le(93, 94),
         vvt1_angle: i16_le(95, 96),
         vvt1_target_angle: data[97],
         vvt1_duty: data[98],
-        flex_boost_correction: u16_le(99, 100),
+        flex_boost_correction: i16_le(99, 100),
         baro_correction: data[101],
         ve_current: data[102],
         ase_value: data[103],
@@ -445,7 +459,7 @@ pub fn get_params_to_publish(d: &SpeeduinoData) -> Vec<(&'static str, String)> {
     let mut params: Vec<(&'static str, String)> = vec![
         // Engine basics
         ("RPM", d.rpm.to_string()),
-        ("TPS", d.tps.to_string()),
+        ("TPS", d.tps_pct().to_string()),
         ("MAP", d.map.to_string()),
         ("BAR", d.baro.to_string()),
         ("BAT", format!("{:.1}", d.battery_voltage())),
@@ -511,12 +525,12 @@ pub fn get_params_to_publish(d: &SpeeduinoData) -> Vec<(&'static str, String)> {
         ("MPD", d.map_dot.to_string()),
         ("CIT", d.cl_idle_target.to_string()),
         // VVT
-        ("VA1", d.vvt1_angle.to_string()),
-        ("VT1", d.vvt1_target_angle.to_string()),
-        ("VD1", d.vvt1_duty.to_string()),
-        ("VA2", d.vvt2_angle.to_string()),
-        ("VT2", d.vvt2_target_angle.to_string()),
-        ("VD2", d.vvt2_duty.to_string()),
+        ("VA1", half(d.vvt1_angle).to_string()),
+        ("VT1", half(d.vvt1_target_angle).to_string()),
+        ("VD1", half(d.vvt1_duty).to_string()),
+        ("VA2", half(d.vvt2_angle).to_string()),
+        ("VT2", half(d.vvt2_target_angle).to_string()),
+        ("VD2", half(d.vvt2_duty).to_string()),
         // Vehicle
         ("VSS", d.vss.to_string()),
         ("GER", d.gear.to_string()),
@@ -559,13 +573,13 @@ pub fn get_params_to_publish(d: &SpeeduinoData) -> Vec<(&'static str, String)> {
         params.push(("EMP", v.to_string()));
     }
     if let Some(v) = d.fan_duty {
-        params.push(("FAN", v.to_string()));
+        params.push(("FAN", half(v).to_string()));
     }
     if let Some(v) = d.air_con_status {
         params.push(("ACS", v.to_string()));
     }
     if let Some(v) = d.actual_dwell {
-        params.push(("ADW", format!("{:.1}", v as f32 / 10.0)));
+        params.push(("ADW", format!("{:.1}", us_to_ms(v))));
     }
     if let Some(v) = d.status5 {
         params.push(("ST5", v.to_string()));
@@ -578,16 +592,16 @@ pub fn get_params_to_publish(d: &SpeeduinoData) -> Vec<(&'static str, String)> {
     }
     // PW5–PW8 — 138-byte packets only
     if let Some(v) = d.pw5 {
-        params.push(("PW5", format!("{:.1}", v as f32 / 10.0)));
+        params.push(("PW5", format!("{:.1}", us_to_ms(v))));
     }
     if let Some(v) = d.pw6 {
-        params.push(("PW6", format!("{:.1}", v as f32 / 10.0)));
+        params.push(("PW6", format!("{:.1}", us_to_ms(v))));
     }
     if let Some(v) = d.pw7 {
-        params.push(("PW7", format!("{:.1}", v as f32 / 10.0)));
+        params.push(("PW7", format!("{:.1}", us_to_ms(v))));
     }
     if let Some(v) = d.pw8 {
-        params.push(("PW8", format!("{:.1}", v as f32 / 10.0)));
+        params.push(("PW8", format!("{:.1}", us_to_ms(v))));
     }
 
     params
@@ -604,7 +618,7 @@ pub fn get_params_to_publish(d: &SpeeduinoData) -> Vec<(&'static str, String)> {
 pub fn canonical(d: &SpeeduinoData) -> Channels {
     let mut c = Channels::new();
     add(&mut c, "rpm", f64::from(d.rpm));
-    add(&mut c, "throttle", f64::from(d.tps));
+    add(&mut c, "throttle", f64::from(d.tps_pct()));
     add(&mut c, "manifoldKpa", f64::from(d.map));
     add(&mut c, "batteryV", f64::from(d.battery_voltage()));
     add(&mut c, "coolantC", f64::from(d.coolant_celsius()));
@@ -766,8 +780,8 @@ pub struct SimValues {
     pub loops_per_second: u16,
     pub vss_kmh: u16,
     pub gear: u8,
-    pub oil_kpa: u8,
-    pub fuel_kpa: u8,
+    pub oil_psi: u8,
+    pub fuel_psi: u8,
 }
 
 /// Build a 130-byte 2025.01 `A` packet.
@@ -792,18 +806,18 @@ pub fn encode(v: &SimValues) -> Vec<u8> {
     p[19] = v.ve;
     p[21] = (v.afr_target * 10.0).round().clamp(0.0, 255.0) as u8;
     p[24] = v.advance as u8;
-    p[25] = v.tps;
+    p[25] = (u16::from(v.tps) * 2).min(200) as u8;
     put16(&mut p, 26, v.loops_per_second);
     put16(&mut p, 28, 4096);
     p[32] = v.status2;
     p[41] = v.baro;
-    put16(&mut p, 76, (v.pw1_ms * 10.0).round() as u16);
-    put16(&mut p, 90, (v.dwell_ms * 10.0).round() as u16);
+    put16(&mut p, 76, (v.pw1_ms * 1000.0).round() as u16);
+    put16(&mut p, 90, (v.dwell_ms * 1000.0).round() as u16);
     p[102] = v.ve;
     put16(&mut p, 104, v.vss_kmh);
     p[106] = v.gear;
-    p[107] = v.fuel_kpa;
-    p[108] = v.oil_kpa;
+    p[107] = v.fuel_psi;
+    p[108] = v.oil_psi;
     p
 }
 
@@ -928,10 +942,10 @@ mod tests {
                 d.map,
                 d.coolant_celsius(),
                 d.iat_celsius(),
-                d.tps,
+                d.tps_pct(),
                 d.advance
             ),
-            (3500, 95, 88, 31, 42, 28)
+            (3500, 95, 88, 31, 42.0, 28)
         );
         assert!((d.battery_voltage() - 13.9).abs() < 0.01);
         assert!((d.pw1_ms() - 4.2).abs() < 0.01);
@@ -1074,22 +1088,45 @@ mod tests {
     }
 
     #[test]
+    fn tps_byte_is_half_percent_steps() {
+        // sensors.cpp maps the calibrated ADC to 0..200.
+        let mut p = zero_packet();
+        p[25] = 123;
+        let d = parse(&p).unwrap();
+        assert_eq!(d.tps_pct(), 61.5);
+        assert_eq!(canonical(&d)["throttle"], 61.5);
+        let topics = get_params_to_publish(&d);
+        assert!(topics.contains(&("TPS", "61.5".to_string())));
+    }
+
+    #[test]
+    fn rate_and_flex_fields_are_signed() {
+        let mut p = zero_packet();
+        p[22..24].copy_from_slice(&(-250i16).to_le_bytes());
+        p[93..95].copy_from_slice(&(-40i16).to_le_bytes());
+        p[37] = (-3i8) as u8;
+        let d = parse(&p).unwrap();
+        assert_eq!(
+            (d.tps_dot, d.map_dot, d.flex_ign_correction),
+            (-250, -40, -3)
+        );
+    }
+
+    #[test]
     fn test_pw1_bytes_76_77() {
         let mut p = zero_packet();
-        p[76] = 35;
-        p[77] = 0; // 3.5 ms
+        p[76..78].copy_from_slice(&3500u16.to_le_bytes()); // µs
         let d = parse(&p).unwrap();
-        assert_eq!(d.pw1, 35);
+        assert_eq!(d.pw1, 3500);
         assert!((d.pw1_ms() - 3.5).abs() < 0.01);
     }
 
     #[test]
     fn test_dwell_bytes_90_91() {
         let mut p = zero_packet();
-        p[90] = 45;
-        p[91] = 0; // 4.5 ms
+        p[90..92].copy_from_slice(&4500u16.to_le_bytes()); // µs
         let d = parse(&p).unwrap();
-        assert_eq!(d.dwell, 45);
+        assert_eq!(d.dwell, 4500);
         assert!((d.dwell_ms() - 4.5).abs() < 0.01);
     }
 

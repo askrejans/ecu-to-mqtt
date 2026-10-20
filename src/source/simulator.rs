@@ -106,8 +106,8 @@ pub fn state(t: f64) -> SimValues {
         loops_per_second: 2400,
         vss_kmh: speed as u16,
         gear,
-        oil_kpa: (150.0 + rpm * 0.05).min(255.0) as u8,
-        fuel_kpa: 255,
+        oil_psi: (20.0 + rpm * 0.007).min(80.0) as u8,
+        fuel_psi: 43,
     }
 }
 

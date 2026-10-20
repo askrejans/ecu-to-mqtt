@@ -297,24 +297,25 @@
   }
 
   // Engine ----------------------------------------------------------------
-  const pct = (v) => [v, "%"], raw = (v) => [v, ""], kpa = (v) => [v, "kPa"], deg = (v) => [v, "°"];
+  // Time fields are microseconds on the wire (PW1–PW4, dwell).
+  const pct = (v) => [v, "%"], raw = (v) => [v, ""], kpa = (v) => [v, "kPa"], deg = (v) => [v, "°"], ms = (v) => [(v / 1000).toFixed(2), "ms"];
   const FIELDS = [
     ["Engine", [["rpm", "Engine speed", (v) => [v, "rpm"]], ["rpm_dot", "RPM rate", (v) => [v, "rpm/s"]], ["map", "MAP", kpa], ["baro", "Barometer", kpa],
-      ["emap", "EMAP", kpa], ["tps", "Throttle", pct], ["tps_dot", "Throttle rate", (v) => [v / 10, "%/s"]], ["tps_adc", "TPS ADC", raw],
-      ["map_dot", "MAP rate", (v) => [v / 10, "kPa/s"]], ["fuel_load", "Fuel load", raw], ["ign_load", "Ignition load", raw], ["gear", "Gear", raw], ["vss", "Vehicle speed", (v) => [v, "km/h"]]]],
-    ["Fuel", [["pw1", "Pulse width 1", (v) => [v / 10, "ms"]], ["pw2", "Pulse width 2", (v) => [v / 10, "ms"]], ["pw3", "Pulse width 3", (v) => [v / 10, "ms"]],
-      ["pw4", "Pulse width 4", (v) => [v / 10, "ms"]], ["ve1", "VE 1", pct], ["ve2", "VE 2", pct], ["ve_current", "VE current", pct],
+      ["emap", "EMAP", kpa], ["tps", "Throttle", (v) => [v / 2, "%"]], ["tps_dot", "Throttle rate", (v) => [v, "%/s"]], ["tps_adc", "TPS ADC", raw],
+      ["map_dot", "MAP rate", (v) => [v, "kPa/s"]], ["fuel_load", "Fuel load", kpa], ["ign_load", "Ignition load", raw], ["gear", "Gear", raw], ["vss", "Vehicle speed", (v) => [v, "km/h"]]]],
+    ["Fuel", [["pw1", "Pulse width 1", ms], ["pw2", "Pulse width 2", ms], ["pw3", "Pulse width 3", ms],
+      ["pw4", "Pulse width 4", ms], ["ve1", "VE 1", pct], ["ve2", "VE 2", pct], ["ve_current", "VE current", pct],
       ["afr_target", "AFR target", (v) => [v / 10, ""]], ["o2_primary", "O2 primary", (v) => [v / 10, "AFR"]], ["o2_secondary", "O2 secondary", (v) => [v / 10, "AFR"]],
       ["corrections", "Total correction", pct], ["ego_correction", "EGO correction", pct], ["iat_correction", "IAT correction", pct], ["wue_correction", "Warm-up enrich", pct],
       ["bat_correction", "Battery correction", pct], ["baro_correction", "Baro correction", pct], ["ase_value", "After-start enrich", pct], ["tae_amount_raw", "Accel enrich", (v) => [v * 2, "%"]],
-      ["fuel_pressure", "Fuel pressure", kpa], ["ethanol_pct", "Ethanol", pct], ["flex_correction", "Flex fuel corr.", pct], ["fuel_temp_correction", "Fuel temp corr.", pct]]],
-    ["Ignition", [["advance", "Advance", deg], ["advance1", "Advance table 1", deg], ["advance2", "Advance table 2", deg], ["dwell", "Dwell", (v) => [v / 10, "ms"]],
-      ["actual_dwell", "Measured dwell", (v) => [v / 10, "ms"]], ["flex_ign_correction", "Flex ign. corr.", deg], ["knock_count", "Knock count", raw], ["knock_retard", "Knock retard", deg]]],
+      ["fuel_pressure", "Fuel pressure", (v) => [v, "PSI"]], ["ethanol_pct", "Ethanol", pct], ["flex_correction", "Flex fuel corr.", pct], ["fuel_temp_correction", "Fuel temp corr.", pct]]],
+    ["Ignition", [["advance", "Advance", deg], ["advance1", "Advance table 1", deg], ["advance2", "Advance table 2", deg], ["dwell", "Dwell", ms],
+      ["actual_dwell", "Measured dwell", ms], ["flex_ign_correction", "Flex ign. corr.", deg], ["knock_count", "Knock count", raw], ["knock_retard", "Knock retard", deg]]],
     ["Temperatures & pressures", [["coolant_raw", "Coolant", (v) => tempPair("coolantC", v - 40)], ["iat_raw", "Intake air", (v) => tempPair("intakeC", v - 40)],
-      ["fuel_temp_raw", "Fuel", (v) => tempPair("fuelC", v - 40)], ["oil_pressure", "Oil pressure", kpa], ["battery_10", "Battery", (v) => [v / 10, "V"]]]],
-    ["Boost, idle, VVT", [["boost_target_raw", "Boost target", (v) => [v * 2, "kPa"]], ["boost_duty_raw", "Boost duty", (v) => [v * 100, "%"]], ["flex_boost_correction", "Flex boost corr.", kpa],
-      ["idle_load", "Idle load", raw], ["cl_idle_target", "Idle target", (v) => [v * 10, "rpm"]], ["vvt1_angle", "VVT1 angle", deg], ["vvt1_target_angle", "VVT1 target", deg],
-      ["vvt1_duty", "VVT1 duty", pct], ["vvt2_angle", "VVT2 angle", deg], ["vvt2_target_angle", "VVT2 target", deg], ["vvt2_duty", "VVT2 duty", pct], ["fan_duty", "Fan duty", pct], ["wmi_pw", "WMI pulse width", raw]]],
+      ["fuel_temp_raw", "Fuel", (v) => tempPair("fuelC", v - 40)], ["oil_pressure", "Oil pressure", (v) => [v, "PSI"]], ["battery_10", "Battery", (v) => [v / 10, "V"]]]],
+    ["Boost, idle, VVT", [["boost_target_raw", "Boost target", (v) => [v * 2, "kPa"]], ["boost_duty_raw", "Boost duty", pct], ["flex_boost_correction", "Flex boost corr.", kpa],
+      ["idle_load", "Idle load", raw], ["cl_idle_target", "Idle target", (v) => [v * 10, "rpm"]], ["vvt1_angle", "VVT1 angle", (v) => [v / 2, "°"]], ["vvt1_target_angle", "VVT1 target", (v) => [v / 2, "°"]],
+      ["vvt1_duty", "VVT1 duty", (v) => [v / 2, "%"]], ["vvt2_angle", "VVT2 angle", (v) => [v / 2, "°"]], ["vvt2_target_angle", "VVT2 target", (v) => [v / 2, "°"]], ["vvt2_duty", "VVT2 duty", (v) => [v / 2, "%"]], ["fan_duty", "Fan duty", (v) => [v / 2, "%"]], ["wmi_pw", "WMI pulse width", raw]]],
     ["Controller", [["secl", "Seconds counter", (v) => [v, "s"]], ["loops_per_second", "Main loops", (v) => [v, "/s"]], ["free_ram", "Free RAM", (v) => [v, "B"]],
       ["sync_loss_counter", "Sync losses", raw], ["next_error", "Next error code", raw], ["test_outputs", "Test outputs", raw], ["ts_sd_status", "SD card status", raw]]],
   ];
