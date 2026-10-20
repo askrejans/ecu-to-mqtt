@@ -88,6 +88,7 @@ sudo dnf install ecu-to-mqtt
 
 ```bash
 brew tap askrejans/g86racing
+brew trust askrejans/g86racing        # Homebrew asks once for third-party taps
 brew install ecu-to-mqtt
 ```
 
