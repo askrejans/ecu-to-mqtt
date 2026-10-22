@@ -130,8 +130,14 @@ pub struct AppConfig {
     #[serde(default = "default_mqtt_port")]
     pub mqtt_port: u16,
 
-    /// Base MQTT topic prefix (e.g. "/ECU/")
-    #[serde(default = "default_mqtt_base_topic")]
+    /// G86 car slug (`^[a-z0-9][a-z0-9-]{0,31}$`). When set and
+    /// `mqtt_base_topic` is not, the base topic is `/g86/<car>/ecu`.
+    #[serde(default)]
+    pub car: Option<String>,
+
+    /// Base MQTT topic prefix. Unset: `/g86/<car>/ecu` when `car` is set,
+    /// otherwise the legacy default `/ECU/`. Read it through [`AppConfig::base_topic`].
+    #[serde(default)]
     pub mqtt_base_topic: String,
 
     /// MQTT Quality of Service level (0, 1, or 2)
@@ -268,8 +274,18 @@ fn default_mqtt_host() -> String {
 fn default_mqtt_port() -> u16 {
     1883
 }
-fn default_mqtt_base_topic() -> String {
-    "/ECU/".to_string()
+/// Base topic when neither `mqtt_base_topic` nor `car` is configured
+/// (unchanged since 0.5, so existing installs keep their topics).
+pub const LEGACY_BASE_TOPIC: &str = "/ECU/";
+
+/// `car` slug as in the G86 car-computer contract.
+pub fn valid_car(car: &str) -> bool {
+    let b = car.as_bytes();
+    !b.is_empty()
+        && b.len() <= 32
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 fn default_mqtt_qos() -> i32 {
     0
@@ -310,6 +326,30 @@ impl AppConfig {
         }
     }
 
+    /// Effective base topic: an explicit `mqtt_base_topic` wins, then
+    /// `/g86/<car>/ecu`, then the legacy `/ECU/`.
+    pub fn base_topic(&self) -> String {
+        let explicit = self.mqtt_base_topic.trim();
+        if !explicit.is_empty() {
+            return explicit.to_string();
+        }
+        match self.car.as_deref().map(str::trim) {
+            Some(car) if !car.is_empty() => format!("/g86/{car}/ecu"),
+            _ => LEGACY_BASE_TOPIC.to_string(),
+        }
+    }
+
+    /// Where the base topic came from, for the startup log.
+    pub fn base_topic_origin(&self) -> &'static str {
+        if !self.mqtt_base_topic.trim().is_empty() {
+            "mqtt_base_topic"
+        } else if self.car.as_deref().is_some_and(|c| !c.trim().is_empty()) {
+            "car"
+        } else {
+            "legacy default"
+        }
+    }
+
     pub fn wants(&self, format: MqttFormat) -> bool {
         self.mqtt_formats.contains(&format)
     }
@@ -317,6 +357,7 @@ impl AppConfig {
     /// Settings as JSON with secrets masked (`--check-config`, `/api/v1/config`).
     pub fn redacted(&self) -> serde_json::Value {
         let mut v = serde_json::to_value(self).unwrap_or_default();
+        v["mqtt_base_topic"] = self.base_topic().into();
         for key in ["mqtt_password", "http_token"] {
             if v.get(key).is_some_and(|x| !x.is_null()) {
                 v[key] = "***".into();
@@ -346,6 +387,14 @@ impl AppConfig {
             .is_some_and(|p| !Path::new(p).is_absolute())
         {
             bail!("telemetry_log must be an absolute path");
+        }
+        if let Some(car) = &self.car
+            && !valid_car(car.trim())
+        {
+            bail!(
+                "car must be a slug of 1-32 lower-case letters, digits and hyphens \
+                 starting with a letter or digit (e.g. \"golf86\"), got \"{car}\""
+            );
         }
         let connection = self.connection_type.to_lowercase();
         let protocol = self.ecu_protocol;
@@ -419,9 +468,8 @@ impl AppConfig {
             if self.mqtt_port == 0 {
                 bail!("mqtt_port must be greater than 0");
             }
-            if self.mqtt_base_topic.trim_matches('/').is_empty()
-                || self.mqtt_base_topic.contains(['#', '+'])
-            {
+            let base = self.base_topic();
+            if base.trim_matches('/').is_empty() || base.contains(['#', '+']) {
                 bail!("mqtt_base_topic must be a non-empty topic without wildcards");
             }
             if !(0..=2).contains(&self.mqtt_qos) {
@@ -704,7 +752,42 @@ mod tests {
 
     #[test]
     fn default_topic_is_generic() {
-        assert_eq!(AppConfig::default().mqtt_base_topic, "/ECU/");
+        assert_eq!(AppConfig::default().base_topic(), "/ECU/");
+    }
+
+    /// Explicit base wins, then the car namespace, then the legacy default,
+    /// so existing installs keep their topics when they upgrade.
+    #[test]
+    fn base_topic_resolution_keeps_existing_installs() {
+        let from_env = |vars: &[(&str, &str)]| -> AppConfig {
+            Config::builder()
+                .add_source(env_source(Some(
+                    vars.iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                )))
+                .build()
+                .unwrap()
+                .try_deserialize()
+                .unwrap()
+        };
+        let legacy = from_env(&[]);
+        assert_eq!(legacy.base_topic(), "/ECU/");
+        assert_eq!(legacy.base_topic_origin(), "legacy default");
+        let car = from_env(&[("ECU_TO_MQTT_CAR", "qa-car")]);
+        assert_eq!(car.base_topic(), "/g86/qa-car/ecu");
+        assert_eq!(car.base_topic_origin(), "car");
+        car.validate().unwrap();
+        assert_eq!(car.redacted()["mqtt_base_topic"], "/g86/qa-car/ecu");
+        let both = parse_toml("car = \"golf86\"\nmqtt_base_topic = \"/GOLF86/ECU/\"\n");
+        assert_eq!(both.base_topic(), "/GOLF86/ECU/");
+        for bad in ["Golf86", "-car", "car_86", "", &"a".repeat(33)] {
+            let c = AppConfig {
+                car: Some(bad.to_string()),
+                ..Default::default()
+            };
+            assert!(c.validate().is_err(), "{bad:?} accepted");
+        }
     }
 
     #[test]
