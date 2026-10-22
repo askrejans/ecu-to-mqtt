@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.4
+
+### Added
+- `<base>/health`: the G86 car-computer bridge health document (retained,
+  QoS 1), every 5 s and at once when `state` or `link` changes: `state`
+  (`ok` / `degraded` / `down`), ECU `link`, `sources`, `rateHz`, `ageMs`,
+  fresh `channels`, `errors` (`decode`, `timeouts`, `reconnects`),
+  `clockSynced` (kernel NTP/GPS sync flag on Linux) and the envelope's
+  `bootId`. A final `down` document precedes `offline` on a clean shutdown.
+  The G86 logger, app and pit wall use it for the health view.
+- `car` (`ECU_TO_MQTT_CAR`): a G86 car slug. With `car` set and no
+  `mqtt_base_topic`, the base topic is `/g86/<car>/ecu`.
+
+### Compatibility
+- An explicit `mqtt_base_topic` still wins, and with neither key set the
+  default stays `/ECU/`: existing installs keep their topics. The resolved
+  base is logged at startup and shown by `--check-config`. `<base>/status`,
+  the envelope and every other topic are unchanged.
+
 ## 0.7.3
 
 ### Changed
