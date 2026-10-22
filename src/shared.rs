@@ -138,6 +138,8 @@ pub struct Shared {
     pub bus: broadcast::Sender<Arc<Stamped>>,
     snapshot: RwLock<Snapshot>,
     pub started: Instant,
+    /// Per-process id: the envelope's `bootId`, also in `<base>/health`.
+    pub boot_id: String,
 }
 
 impl Shared {
@@ -149,6 +151,7 @@ impl Shared {
             bus,
             snapshot: RwLock::new(Snapshot::new(protocol, mqtt_enabled)),
             started: Instant::now(),
+            boot_id: crate::sample::new_boot_id(),
         })
     }
 

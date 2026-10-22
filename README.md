@@ -214,6 +214,38 @@ there is nothing new, the request is held until the next sample (at most
 Per reply topic, answers are limited by a token bucket (bursts of 12, 100 a
 second on average), for up to 32 reply topics.
 
+**Base topic.** One `car` key puts the bridge in the G86 car-computer
+namespace; an explicit `mqtt_base_topic` always wins, and with neither the
+old default stays, so upgrading never moves an existing install's topics:
+
+| `car` | `mqtt_base_topic` | `<base>` |
+|---|---|---|
+| `golf86` | unset | `/g86/golf86/ecu` |
+| any | `/GOLF86/ECU/` | `/GOLF86/ECU/` |
+| unset | unset | `/ECU/` (legacy default) |
+
+The resolved base is logged at startup and shown by `--check-config`.
+
+**Health.** `<base>/health` (retained, QoS 1) is the G86 bridge health
+document, published every 5 s and at once when `state` or `link` changes; on
+a clean shutdown a final `down` document precedes `offline`:
+
+```json
+{"schema":1,"bridge":"ecu-to-mqtt","version":"0.7.4","bootId":"1585-1792493938610",
+ "timestampMs":1792664130000,"state":"ok","link":"connected",
+ "sources":["speeduino-primary-a"],"rateHz":49.8,"ageMs":14,
+ "channels":["coolantC","rpm","throttle"],
+ "errors":{"decode":0,"timeouts":2,"reconnects":0},"clockSynced":true}
+```
+
+`state` is `down` without an ECU link or with no sample for 10 s, `degraded`
+when the last sample is older than 2 s or an error counter rose in the last
+5 s, else `ok`. `rateHz` counts canonical samples over 5 s, `ageMs` is the age
+of the last sample, `channels` the keys fresh within 2 s, `bootId` the
+envelope's. `clockSynced` is the kernel's NTP/GPS sync flag (`adjtimex`) on
+Linux and `true` elsewhere. Consumers treat a document older than 15 s, or
+`status` = `offline`, as down.
+
 `<base>/status` is `online`/`offline` (retained, with a last will). State is
 re-sent after every reconnect. While the broker is unreachable live samples
 are dropped and counted, and acquisition never waits. TLS: `mqtt_use_tls`,
@@ -293,7 +325,7 @@ Every key is documented in [example.settings.toml](example.settings.toml).
 |---|---|
 | ECU | `ecu_protocol`, `can_base_id`, `refresh_rate_ms`, `read_timeout_ms`, `expected_data_length` |
 | Connection | `connection_type`, `port_name`, `baud_rate`, `tcp_host`, `tcp_port`, `can_interface`, `max_retry_count`, `initial_retry_delay_ms`, `max_retry_delay_ms` |
-| MQTT | `mqtt_enabled`, `mqtt_host`, `mqtt_port`, `mqtt_base_topic`, `mqtt_formats`, `mqtt_max_rate_hz`, `mqtt_qos`, `mqtt_client_id`, `mqtt_username`, `mqtt_password(_file)`, `mqtt_use_tls`, `mqtt_ca_cert_path`, `mqtt_client_cert_path`, `mqtt_client_key_path`, `mqtt_homeassistant_prefix`, `message_buffer_size` |
+| MQTT | `mqtt_enabled`, `mqtt_host`, `mqtt_port`, `car`, `mqtt_base_topic`, `mqtt_formats`, `mqtt_max_rate_hz`, `mqtt_qos`, `mqtt_client_id`, `mqtt_username`, `mqtt_password(_file)`, `mqtt_use_tls`, `mqtt_ca_cert_path`, `mqtt_client_cert_path`, `mqtt_client_key_path`, `mqtt_homeassistant_prefix`, `message_buffer_size` |
 | HTTP | `http_enabled`, `http_bind`, `http_port`, `http_token`, `http_cors_origin`, `http_ui` |
 | Logging | `log_level`, `log_json`, `telemetry_log` |
 

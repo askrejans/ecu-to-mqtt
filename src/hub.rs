@@ -34,7 +34,7 @@ pub async fn run(
     archive: Option<mpsc::Sender<Arc<str>>>,
     cancel: CancellationToken,
 ) {
-    let boot_id = sample::new_boot_id();
+    let boot_id = shared.boot_id.clone();
     let mut sequence = 0u64;
     let mut this_second = 0u64;
     let mut tick = tokio::time::interval(Duration::from_secs(1));

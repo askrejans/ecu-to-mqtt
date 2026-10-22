@@ -13,6 +13,7 @@
 mod archive;
 mod config;
 mod errors;
+mod health;
 mod hub;
 mod output;
 mod protocol;
@@ -230,6 +231,13 @@ async fn main() -> Result<()> {
     );
     for o in &outputs {
         info!("Output: {o}");
+    }
+    if config.mqtt_enabled {
+        info!(
+            "MQTT base topic: {} ({})",
+            config.base_topic(),
+            config.base_topic_origin()
+        );
     }
 
     let cancel = CancellationToken::new();

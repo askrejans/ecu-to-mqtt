@@ -120,9 +120,15 @@ and takes the first one whose signature maps to a profile.
 
 ### 4.1 MQTT
 
-All topics are under `mqtt_base_topic` (trailing `/` removed).
+All topics are under the base topic (trailing `/` removed): `mqtt_base_topic`
+when set, else `/g86/<car>/ecu` when `car` is set, else the legacy `/ECU/`
+(`AppConfig::base_topic`).
 
 * **`<base>/status`**: `online` / `offline`, retained, QoS 1; `offline` is the last will.
+* **`<base>/health`**: G86 car-computer bridge health (`src/health.rs`, API
+  `contracts/CAR_COMPUTER.md` §2), retained, QoS 1, every 5 s and when `state`
+  or `link` changes; a final `down` document before `offline` on shutdown.
+  `bootId` is shared with the envelope (`Shared::boot_id`).
 * **`canonical`**: `<base>/telemetry`, never retained, never throttled. Exactly
   seven keys: `schema` (1), `source`, `partial`, `bootId`, `timestampMs`,
   `sequence`, `channels`. This is the contract of the G86 app

@@ -706,6 +706,7 @@ dependencies = [
  "crossterm",
  "dotenvy",
  "futures-util",
+ "libc",
  "ratatui",
  "rumqttc",
  "serde",

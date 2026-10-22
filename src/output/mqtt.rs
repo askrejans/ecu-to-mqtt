@@ -8,6 +8,9 @@
 //! | `homeassistant` | `<prefix>/sensor/<node>/…/config`      | yes      | on connect      |
 //!
 //! `<base>/status` is `online`/`offline` (retained; `offline` is the last will).
+//! `<base>/health` (retained) is the G86 car-computer bridge health JSON
+//! (`crate::health`): every 5 s and at once when its state or link changes;
+//! a final `down` document precedes `offline` on a clean shutdown.
 //!
 //! **On demand** (for consumers on slow links, such as the G86 display): a
 //! message on `<base>/telemetry/get` whose payload is a reply topic is
@@ -19,6 +22,7 @@
 //! samples are dropped and counted, and state is re-sent after reconnecting.
 
 use crate::config::{AppConfig, MqttFormat};
+use crate::health;
 use crate::protocol::speeduino::{self, SpeeduinoData};
 use crate::sample::Stamped;
 use crate::shared::{CHANNEL_MAX_AGE_MS, Counters, LinkStatus, Shared};
@@ -215,7 +219,7 @@ fn options(config: &AppConfig, id: &str) -> Result<MqttOptions> {
     o.set_request_channel_capacity(config.message_buffer_size.max(16));
     o.set_max_packet_size(256 * 1024, 256 * 1024);
     o.set_last_will(LastWill::new(
-        topic(&config.mqtt_base_topic, "status"),
+        topic(&config.base_topic(), "status"),
         "offline",
         QoS::AtLeastOnce,
         true,
@@ -278,7 +282,8 @@ pub fn active_flags(d: &SpeeduinoData) -> Vec<String> {
 
 /// Home Assistant discovery documents for the main channels.
 pub fn homeassistant_discovery(config: &AppConfig) -> Vec<(String, String)> {
-    let base = config.mqtt_base_topic.trim_end_matches('/');
+    let base = config.base_topic();
+    let base = base.trim_end_matches('/');
     let node = {
         let raw = config
             .mqtt_client_id
@@ -389,7 +394,7 @@ pub async fn run(
     let el_shared = shared.clone();
     let el_cancel = cancel.clone();
     let el_client = client.clone();
-    let demand_topic = topic(&config.mqtt_base_topic, "telemetry/get");
+    let demand_topic = topic(&config.base_topic(), "telemetry/get");
     let event_loop = tokio::spawn(async move {
         let mut delay = Duration::from_secs(1);
         let mut answered: HashMap<String, DemandClient> = HashMap::new();
@@ -494,6 +499,9 @@ struct Publisher {
     min_interval: Option<Duration>,
     last_state_at: Option<Instant>,
     latest: Option<Arc<Stamped>>,
+    health: health::Tracker,
+    /// (state, link) and time of the last published health document.
+    health_sent: Option<(String, String, Instant)>,
 }
 
 impl Publisher {
@@ -510,6 +518,8 @@ impl Publisher {
             min_interval,
             last_state_at: None,
             latest: None,
+            health: health::Tracker::new(),
+            health_sent: None,
         }
     }
 
@@ -529,7 +539,7 @@ impl Publisher {
     fn on_connect(&mut self) {
         self.last.clear();
         self.last_state_at = None;
-        let base = self.config.mqtt_base_topic.clone();
+        let base = self.config.base_topic();
         self.send(
             topic(&base, "status"),
             "online".into(),
@@ -541,8 +551,44 @@ impl Publisher {
                 self.send(t, doc, true, QoS::AtLeastOnce);
             }
         }
+        self.health_sent = None;
+        self.publish_health(true);
         if let Some(latest) = self.latest.clone() {
             self.publish_state(&latest, true);
+        }
+    }
+
+    /// `<base>/health`: when forced, every HEALTH_INTERVAL, or when the state
+    /// or link changed since the last document.
+    fn publish_health(&mut self, connected: bool) {
+        if !connected {
+            return;
+        }
+        let now = Instant::now();
+        let doc = self
+            .health
+            .document(&self.shared, now, health::clock_synced());
+        let key = (
+            doc["state"].as_str().unwrap_or_default().to_string(),
+            doc["link"].as_str().unwrap_or_default().to_string(),
+        );
+        let due = match &self.health_sent {
+            None => true,
+            Some((state, link, at)) => {
+                *state != key.0
+                    || *link != key.1
+                    || now.duration_since(*at) >= health::HEALTH_INTERVAL
+            }
+        };
+        if due
+            && self.send(
+                topic(&self.config.base_topic(), "health"),
+                doc.to_string(),
+                true,
+                QoS::AtLeastOnce,
+            )
+        {
+            self.health_sent = Some((key.0, key.1, now));
         }
     }
 
@@ -556,7 +602,7 @@ impl Publisher {
             return;
         }
         self.last_state_at = Some(now);
-        let base = self.config.mqtt_base_topic.clone();
+        let base = self.config.base_topic();
         if self.config.wants(MqttFormat::Legacy)
             && let Some(d) = &stamped.sample.speeduino
         {
@@ -584,13 +630,18 @@ impl Publisher {
 
     fn on_sample(&mut self, stamped: Arc<Stamped>, connected: bool) {
         self.latest = Some(stamped.clone());
+        self.health.on_sample(
+            stamped.sample.source,
+            stamped.sample.captured_ms,
+            Instant::now(),
+        );
         if !connected {
             Counters::inc(&self.shared.counters.mqtt_dropped);
             return;
         }
         if self.config.wants(MqttFormat::Canonical) {
             // Never retained: consumers reject replayed frames as stale.
-            let t = topic(&self.config.mqtt_base_topic, "telemetry");
+            let t = topic(&self.config.base_topic(), "telemetry");
             self.send(t, stamped.envelope.to_string(), false, self.qos);
         }
         self.publish_state(&stamped, false);
@@ -603,9 +654,13 @@ impl Publisher {
         cancel: CancellationToken,
     ) {
         let mut connected = false;
+        // state changes (link lost, samples stopping) are noticed within a second
+        let mut health_tick = tokio::time::interval(Duration::from_secs(1));
+        health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
+                _ = health_tick.tick() => self.publish_health(connected),
                 changed = conn.changed() => {
                     if changed.is_err() { break; }
                     connected = *conn.borrow_and_update();
@@ -619,8 +674,17 @@ impl Publisher {
             }
         }
         if connected {
+            let last = self
+                .health
+                .document(&self.shared, Instant::now(), health::clock_synced());
             self.send(
-                topic(&self.config.mqtt_base_topic, "status"),
+                topic(&self.config.base_topic(), "health"),
+                health::shutdown_document(last).to_string(),
+                true,
+                QoS::AtLeastOnce,
+            );
+            self.send(
+                topic(&self.config.base_topic(), "status"),
                 "offline".into(),
                 true,
                 QoS::AtLeastOnce,

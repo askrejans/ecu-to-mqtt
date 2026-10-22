@@ -52,6 +52,8 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 # Native SocketCAN input (Linux only; other platforms use the CAN gateway)
 [target.'cfg(target_os = "linux")'.dependencies]
 socketcan = { version = "4.0.0", features = ["tokio"] }
+# adjtimex: whether the clock is synchronised (`<base>/health`)
+libc = "0.2.191"
 
 [dev-dependencies]
 tempfile = "3.27.0"
