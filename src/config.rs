@@ -136,7 +136,7 @@ pub struct AppConfig {
     pub car: Option<String>,
 
     /// Base MQTT topic prefix. Unset: `/g86/<car>/ecu` when `car` is set,
-    /// otherwise the legacy default `/ECU/`. Read it through [`AppConfig::base_topic`].
+    /// otherwise the default `/telemetry/ecu`. Read it through [`AppConfig::base_topic`].
     #[serde(default)]
     pub mqtt_base_topic: String,
 
@@ -276,7 +276,7 @@ fn default_mqtt_port() -> u16 {
 }
 /// Base topic when neither `mqtt_base_topic` nor `car` is configured
 /// (unchanged since 0.5, so existing installs keep their topics).
-pub const LEGACY_BASE_TOPIC: &str = "/ECU/";
+pub const DEFAULT_BASE_TOPIC: &str = "/telemetry/ecu";
 
 /// `car` slug as in the G86 car-computer contract.
 pub fn valid_car(car: &str) -> bool {
@@ -327,7 +327,7 @@ impl AppConfig {
     }
 
     /// Effective base topic: an explicit `mqtt_base_topic` wins, then
-    /// `/g86/<car>/ecu`, then the legacy `/ECU/`.
+    /// `/g86/<car>/ecu`, then the default `/telemetry/ecu`.
     pub fn base_topic(&self) -> String {
         let explicit = self.mqtt_base_topic.trim();
         if !explicit.is_empty() {
@@ -335,7 +335,7 @@ impl AppConfig {
         }
         match self.car.as_deref().map(str::trim) {
             Some(car) if !car.is_empty() => format!("/g86/{car}/ecu"),
-            _ => LEGACY_BASE_TOPIC.to_string(),
+            _ => DEFAULT_BASE_TOPIC.to_string(),
         }
     }
 
@@ -346,7 +346,7 @@ impl AppConfig {
         } else if self.car.as_deref().is_some_and(|c| !c.trim().is_empty()) {
             "car"
         } else {
-            "legacy default"
+            "default"
         }
     }
 
@@ -748,17 +748,21 @@ mod tests {
             .unwrap();
         let local = paths.iter().position(|p| p == "./settings.toml").unwrap();
         assert!(system < local);
+        let legacy = paths
+            .iter()
+            .position(|p| p == "/etc/g86-car-telemetry/ecu-to-mqtt.toml")
+            .unwrap();
+        assert!(legacy < system);
     }
 
     #[test]
     fn default_topic_is_generic() {
-        assert_eq!(AppConfig::default().base_topic(), "/ECU/");
+        assert_eq!(AppConfig::default().base_topic(), "/telemetry/ecu");
     }
 
-    /// Explicit base wins, then the car namespace, then the legacy default,
-    /// so existing installs keep their topics when they upgrade.
+    /// Explicit base wins, then the optional car namespace, then the generic default.
     #[test]
-    fn base_topic_resolution_keeps_existing_installs() {
+    fn base_topic_resolution_preserves_explicit_settings() {
         let from_env = |vars: &[(&str, &str)]| -> AppConfig {
             Config::builder()
                 .add_source(env_source(Some(
@@ -772,13 +776,15 @@ mod tests {
                 .unwrap()
         };
         let legacy = from_env(&[]);
-        assert_eq!(legacy.base_topic(), "/ECU/");
-        assert_eq!(legacy.base_topic_origin(), "legacy default");
+        assert_eq!(legacy.base_topic(), "/telemetry/ecu");
+        assert_eq!(legacy.base_topic_origin(), "default");
         let car = from_env(&[("ECU_TO_MQTT_CAR", "qa-car")]);
         assert_eq!(car.base_topic(), "/g86/qa-car/ecu");
         assert_eq!(car.base_topic_origin(), "car");
         car.validate().unwrap();
         assert_eq!(car.redacted()["mqtt_base_topic"], "/g86/qa-car/ecu");
+        let explicit_legacy = parse_toml("mqtt_base_topic = \"/ECU/\"\n");
+        assert_eq!(explicit_legacy.base_topic(), "/ECU/");
         let both = parse_toml("car = \"golf86\"\nmqtt_base_topic = \"/GOLF86/ECU/\"\n");
         assert_eq!(both.base_topic(), "/GOLF86/ECU/");
         for bad in ["Golf86", "-car", "car_86", "", &"a".repeat(33)] {

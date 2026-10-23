@@ -87,10 +87,10 @@ mqtt_port = 1883
 # car = "golf86"
 
 # Topic prefix; set it explicitly to keep a custom layout (it wins over `car`).
-# Neither set: the legacy default "/ECU/", so existing installs keep working.
+# Neither set: the default "/telemetry/ecu". Set the old prefix explicitly when upgrading.
 # <base>/status is "online"/"offline" (retained, last will).
 # <base>/health is the bridge health JSON (retained, every 5 s and on change).
-mqtt_base_topic = "/ECU/"
+mqtt_base_topic = "/telemetry/ecu"
 
 # What to publish (list, or a comma-separated string in the env override):
 #   canonical      <base>/telemetry  JSON envelope per sample, never retained

@@ -14,7 +14,7 @@ transmit. Serial ECUs receive only the documented read requests (`Q`, `A`,
 
 This bridge can publish to any MQTT broker. Configure the broker host, credentials and `mqtt_base_topic` for your own installation; use TLS for a broker reached across an untrusted network. The source distribution and ordinary binaries have no account, subscription or activation dependency. Product-specific subscription checks belong to separately built managed distributions.
 
-For a custom namespace, set `mqtt_base_topic` explicitly (for example `/telemetry/car-1/engine`). An explicit prefix takes precedence over `car`. The optional legacy `car` shortcut keeps its existing `/g86/<car>/…` namespace for compatibility; omitting it does not create an account or select a vehicle profile. Existing defaults and packet fields remain compatible.
+For a custom namespace, set `mqtt_base_topic` explicitly (for example `/telemetry/car-1/engine`). An explicit prefix takes precedence over `car`. The optional legacy `car` shortcut keeps its existing `/g86/<car>/…` namespace for compatibility; omitting it does not create an account or select a vehicle profile. Packet fields remain compatible. Fresh installations use `/telemetry/ecu`; to keep the former default, explicitly set the prefix to `/ECU/` before upgrading.
 
 ## Highlights
 
@@ -228,7 +228,7 @@ old default stays, so upgrading never moves an existing install's topics:
 |---|---|---|
 | `golf86` | unset | `/g86/golf86/ecu` |
 | any | `/GOLF86/ECU/` | `/GOLF86/ECU/` |
-| unset | unset | `/ECU/` (legacy default) |
+| unset | unset | `/telemetry/ecu` (default) |
 
 The resolved base is logged at startup and shown by `--check-config`.
 
