@@ -293,6 +293,7 @@ build_deb() {
 Package: $PKG_NAME
 Version: $PKG_VERSION
 Architecture: $deb_arch
+Depends: libc6 (>= 2.28)
 Maintainer: $PKG_MAINTAINER
 Description: $PKG_DESCRIPTION
  Bridges an engine controller (Speeduino, MegaSquirt or a documented
