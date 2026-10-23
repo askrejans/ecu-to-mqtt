@@ -5,6 +5,7 @@
 - **Migration:** an unconfigured installation now publishes below `/telemetry/ecu` instead of `/ECU/`. Set `mqtt_base_topic` explicitly to `/ECU/` before upgrading if consumers need the former default. Explicit settings and optional `car` namespaces keep their topics.
 
 - Declare the Linux runtime libraries required by the shipped Debian binary.
+- Require Tokio 1.54.1 to fix RUSTSEC-2026-0384 in the interval timer.
 - Document standalone use with arbitrary MQTT brokers and explicit topic prefixes; preserve explicit topic prefixes and telemetry packet contracts.
 
 ## 0.7.4
