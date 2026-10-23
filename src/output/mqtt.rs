@@ -356,7 +356,7 @@ pub fn homeassistant_discovery(config: &AppConfig) -> Vec<(String, String)> {
                 "device": {
                     "identifiers": [format!("ecu_to_mqtt_{node}")],
                     "name": format!("ECU {base}"),
-                    "manufacturer": "G86 Racing",
+                    "manufacturer": "ecu-to-mqtt",
                     "model": "ecu-to-mqtt",
                     "sw_version": env!("CARGO_PKG_VERSION"),
                 },

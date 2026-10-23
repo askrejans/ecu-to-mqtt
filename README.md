@@ -10,6 +10,12 @@ Nothing is ever written to the ECU: no tuning, no map access, no burns, no CAN
 transmit. Serial ECUs receive only the documented read requests (`Q`, `A`,
 `a 00 06`).
 
+## Standalone MQTT use
+
+This bridge can publish to any MQTT broker. Configure the broker host, credentials and `mqtt_base_topic` for your own installation; use TLS for a broker reached across an untrusted network. The source distribution and ordinary binaries have no account, subscription or activation dependency. Product-specific subscription checks belong to separately built managed distributions.
+
+For a custom namespace, set `mqtt_base_topic` explicitly (for example `/telemetry/car-1/engine`). An explicit prefix takes precedence over `car`. The optional legacy `car` shortcut keeps its existing `/g86/<car>/…` namespace for compatibility; omitting it does not create an account or select a vehicle profile. Existing defaults and packet fields remain compatible.
+
 ## Highlights
 
 - **Zero configuration for USB ECUs.** `port_name = "auto"` and
@@ -21,7 +27,7 @@ transmit. Serial ECUs receive only the documented read requests (`Q`, `A`,
 - **15 ECU profiles.** Speeduino, MegaSquirt MS2/MS3/MS3Pro/MicroSquirt, and
   documented CAN broadcasts from MegaSquirt, Haltech, MaxxECU, ECUMaster,
   AEMnet, Link and MoTeC.
-- **Industry-standard outputs.** MQTT: the canonical G86 envelope, Speeduino
+- **Industry-standard outputs.** MQTT: a timestamped canonical envelope, Speeduino
   scalar topics, a JSON state document and Home Assistant discovery. Also
   HTTP REST / SSE and Prometheus.
 - **Web dashboard** with Dash, Engine, Charts, Diagnostics and Configuration
